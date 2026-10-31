@@ -39,6 +39,17 @@ Critical path for **offline configurable auctions with daily/weekly/monthly sche
 * Deviations from the plan: Model B golden examples (B-0..B-7) move to P9 (legal gate); property tests use a seeded PRNG instead of `fast-check` (D-31 open); `rounding.ts` merged into `decimal.ts`.
 * G1 still requires the business owner's review of the FINANCIAL_ENGINE numbers.
 
+### P2 status — configuration system complete (branch `claude/p2-configuration-system`)
+
+* **Migration** `20261102000000_p2_configuration_system` (M1, configuration part): `FinancialPolicyVersion`, `PolicyPointer`, `ConfigSnapshot`, enums, `Company.engineEnabled` (false), `ChitGroup.engineVersion` ("LEGACY"); CHECKs, append-only/pointer/snapshot triggers, RLS. Applied to the test DB and to the Supabase dev project (`chit-fund-dev`); schema fingerprints identical; `prisma migrate diff` clean. `FinancialPeriod`/`AccountMapping` (listed under M1) move to P4, where they are used.
+* **Resolver** (`backend/src/modules/financial-policies/resolver.ts`, pure): LEGAL_LIMITS → COMPANY → GROUP, field-level inheritance with per-field source; missing decisions reported, never defaulted; legal-limit and consistency checks; produces the P1 `ChitPolicy` when complete; canonical hash = snapshot hash.
+* **API** `/financial-policies` (API_DESIGN §2 status): templates, effective, history, create, validate (+ worked example), activate, reject, snapshots (read).
+* **Snapshots:** `lockConfigSnapshot()` service (idempotent, refuses incomplete/violating configurations). No endpoint creates snapshots yet: the lock points (D-08) belong to auction sessions (P5).
+* **UI:** read-only "Financial Settings" on each chit group (UX_FLOWS §4.1 status). Editing screens (company defaults, group wizard) are P5 scope.
+* **Policy kinds with schemas:** CHIT_ECONOMICS, AUCTION_RULES, DIVIDEND, CONTRIBUTION, LEGAL_LIMITS (the Model A options of P1). Other kinds return `KIND_NOT_AVAILABLE` with the phase that defines them. AUCTION scope returns `SCOPE_NOT_AVAILABLE` until P5.
+* **Tests:** 37 new (12 unit, 25 integration incl. roles, tenant isolation, legal limits, DB triggers, concurrency); 235/235. Mutation check: removing the per-company advisory lock makes the concurrency tests fail.
+* **Not decided by P2:** who may activate settings (D-14: the activating user is recorded, no maker–checker), the lock point (D-08), legal limit values (L-01/L-02), and every Model A business rule (only selectable). New questions: D-38, D-39 in OPEN_DECISIONS.
+
 ## 3. Dependency graph
 ```
 P0 ─▶ P1 ─▶ P2 ─▶ P3 ─▶ P4 ─▶ P5 ─▶ P6 ─▶ P8

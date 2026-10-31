@@ -74,6 +74,15 @@ Status: **awaiting approval.** Each item lists alternatives and, where reasonabl
 
 `legacyP0Policy()` selects the existing-behaviour option of each row so the engine can be proven equal to P0; it is not an approval of those options.
 
+### 2c. New decisions surfaced by P2
+
+| ID | Question | Current behaviour (P2) |
+|---|---|---|
+| D-38 | Which commission % is authoritative for a group: the existing `ChitGroup.foremanCommissionPct` (used by the legacy auction workflow) or the CHIT_ECONOMICS policy? | The resolver uses the policy value when set, otherwise the group record (source `GROUP_RECORD`), and warns `RATE_DIFFERS_FROM_GROUP_RECORD` when both exist and differ. The legacy workflow keeps using the group record. |
+| D-39 | Who may activate financial settings, and is a second person required (maker–checker for configuration, related to D-14)? | Any manager of the company (super admin for legal limits) may activate; creator and activator are recorded; no separation enforced. |
+
+P2 applied the DATABASE_DESIGN recommendation for D-29 (PostgreSQL enums for the new tables only) and D-21 is not affected (no date columns besides timestamps). D-08 (lock point) is still open: the snapshot mechanism exists, nothing calls it yet.
+
 ## 3. Legal and regulatory validation (L-xx) — to be answered by qualified counsel / CA
 
 | ID | Question | Why it matters |
@@ -112,7 +121,7 @@ Status: **awaiting approval.** Each item lists alternatives and, where reasonabl
 ## 5. Approval checklist for starting implementation
 - [ ] D-01 scope of release 1
 - [ ] D-03, D-07, D-11, D-13 (Model A core rules) — P1 implemented them as explicit policy options without choosing; a decision is now required before any engine-backed group is activated (P2), not for the library
-- [ ] L-01, L-02 answered and legal limit profile values provided — required before any engine group is activated
+- [ ] L-01, L-02 answered and legal limit profile values provided — required before any engine group is activated (P2: the profile exists as the super-admin-only `LEGAL_LIMITS` policy; no values are prefilled, and `readyForLock` stays false until both limits are set)
 - [ ] D-19 ledger cut-over approach — required for P4
 - [ ] D-06 frequency combinations (+ L-06) — required for P5
 - [ ] D-33 / D-34 hosting & scheduler trigger

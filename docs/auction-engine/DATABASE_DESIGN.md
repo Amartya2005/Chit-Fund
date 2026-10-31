@@ -24,6 +24,14 @@ Baseline: Prisma schema at `4d6daa8` (27 tables, 4 migrations; money `NUMERIC(15
 * `AuctionDividendAllocation` (`allocationKey` non-null, unique `(auctionId, allocationKey)`; kinds `TICKET_CREDIT | VACANT_SEATS | ROUNDING_REMAINDER | NO_NEXT_INSTALLMENT`; status `CREDITED_TO_INSTALLMENT | PENDING_DECISION`). This is a P0-scoped precursor of `DividendRecord` (§5); when the engine arrives, these rows are migrated/linked rather than recomputed.
 * Not added in P0: `prizedAt` / `prizedSessionId` on `ChitGroupMember` (prized status is derived from `Auction` rows).
 
+## 1b. Implemented in P2 (migration `20261102000000_p2_configuration_system`)
+* `FinancialPolicyVersion`, `PolicyPointer`, `ConfigSnapshot` and the three enums as in §3, with these differences: `approvedById` is `decidedById` (set on activation **or** rejection) plus `decisionNote`, `supersededAt`, `rejectedAt`; `auctionSessionId` is not created yet (no session table until M4); all FKs `ON DELETE RESTRICT`.
+* Raw-SQL integrity: scope/scopeKey/groupId consistency, LEGAL_LIMITS only at COMPANY scope, status ↔ timestamp consistency, `values` must be a JSON object, snapshot hash format and subject types; trigger `chitkart_policy_version_guard` (content and decisions immutable; only DRAFT→ACTIVE→SUPERSEDED or DRAFT→REJECTED; never supersede the pointed version; no delete); trigger `chitkart_policy_pointer_guard` (pointer → ACTIVE version of the same company/scope/kind); trigger `chitkart_config_snapshot_guard` (no update/delete). Functions use a fixed `search_path`.
+* `Company.engineEnabled` (default false) and `ChitGroup.engineVersion` (default `LEGACY`, non-empty) — not read by any workflow yet.
+* A version is a **complete document for its scope and kind**: a new version replaces the previous one at that scope (it is not merged into it); inheritance happens only between levels (company → group).
+* Existing delete flows refuse to delete a group, or hard-delete a company, that has configuration history (soft delete / status change instead).
+* Not in P2: `FinancialPeriod`, `AccountMapping` (P4).
+
 ## 2. Reuse of existing models
 
 | Existing model | Reuse |

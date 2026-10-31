@@ -74,6 +74,8 @@ Staff (existing tabs) + [PROPOSED]
 5. *Eligibility* — toggles with explanations (e.g. "Members with overdue dues above ₹__ cannot bid").
 6. *Review* — plain-language summary + worked example → *Save as draft* / *Activate*.
 
+**P2 status:** a read-only *Financial settings* view exists on each chit group (button "⚙️ Financial Settings", `mobile/src/modules/manager/FinancialSettingsModal.tsx`): plain-language values, a source chip per value, "Not decided" for open decisions, violations and warnings, change history (managers). The editing steps above (templates, wizard) are not built yet; settings are created through the API. Verified in the web build at desktop and phone widths.
+
 ### 4.2 Create auction configuration wizard (per group)
 | Step | Content | Key UX |
 |---|---|---|

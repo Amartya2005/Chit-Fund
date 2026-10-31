@@ -51,6 +51,22 @@ Idempotency-Key: 6f1d…
 → 422 { "success": false, "code": "LIMIT_EXCEEDED", "message": "Maximum discount 30% exceeds the company legal limit of 25%." }
 ```
 
+**P2 implementation status** (`backend/src/modules/financial-policies/`, all routes under the existing `/api/v1` mounts):
+
+| Implemented route | Roles | Notes |
+|---|---|---|
+| `GET /financial-policies/templates` | SA, M | One template, `MONTHLY_CLASSIC` = current behaviour (UX_FLOWS §7 "Monthly classic"); `legallyValidated: false`; no legal limits. The other presets need scheduling (P5). |
+| `GET /financial-policies/effective?groupId=` | SA, M, S | Staff: assigned groups only, `groupId` required. Super admin without a group must pass `companyId`. Returns `values`, `sources` (`COMPANY`/`GROUP`/`GROUP_RECORD`/`LEGAL_LIMITS`), `missing`, `legalLimits`, `violations`, `warnings`, `deferredChecks`, `complete`, `readyForLock`, `hash`. `sessionId` arrives with P5. |
+| `GET /financial-policies?scope=&groupId=&kind=&status=` | SA, M | History. |
+| `GET /financial-policies/:id` | SA, M | |
+| `POST /financial-policies` | M, SA (LEGAL_LIMITS: SA only) | Creates a DRAFT. `422 VALIDATION_FAILED` (with `details.issues`), `KIND_NOT_AVAILABLE`, `SCOPE_NOT_AVAILABLE`, `LIMIT_EXCEEDED`, `POLICY_INCONSISTENT`; `403 LEGAL_LIMITS_ADMIN_ONLY`. |
+| `POST /financial-policies/:id/validate` | SA, M | Body `{ groupId?, discount? }`: violations the version would introduce, the effective result as if active, and a worked example (contribution; auction outcome when `discount` is given) from the P1 engine. No writes. |
+| `POST /financial-policies/:id/activate` | M, SA (LEGAL_LIMITS: SA only) | Body `{ expectedActiveVersionId?, note? }` replaces `If-Match` (`409 VERSION_CONFLICT`). `409 INVALID_STATE` unless DRAFT; re-activating the active version returns `alreadyActive: true`. Re-checks limits. Activating legal limits never fails on existing settings; it returns `violationsAfter`. |
+| `POST /financial-policies/:id/reject` | M, SA (LEGAL_LIMITS: SA only) | DRAFT only. |
+| `GET /financial-policies/snapshots?subjectType=&subjectId=` | SA, M | Read-only, with `integrityOk` (hash recomputed). |
+
+Differences from the proposal: no `Idempotency-Key` storage yet (activation and rejection are naturally idempotent/state-checked; a duplicated create produces a harmless extra DRAFT); `A` (approver) role not separated (D-14). New error codes are only used on these new routes.
+
 ---
 
 ## 3. Scheduling
