@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
 import { sendError, badRequest } from '../../lib/http.js';
+import { evaluateGroupEligibility } from '../auctions/auctionEligibility.js';
 import { parsePositiveAmount, roundMoney, toPaise, fromPaise } from '../../lib/money.js';
 import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
 import {
@@ -69,6 +70,7 @@ export const listChitGroups = async (req: AuthRequest, res: Response) => {
           },
         },
         members: {
+          where: { status: 'ACTIVE' },
           include: {
             subscriber: {
               select: {
@@ -290,15 +292,18 @@ export const enrollSubscriber = async (req: AuthRequest, res: Response) => {
     }
 
     // Prevent duplicate enrollment in the same group
-    const alreadyEnrolled = group.members.some((m) => m.subscriberId === subscriberId);
-    if (alreadyEnrolled) {
+    const priorTicket = group.members.find((m) => m.subscriberId === subscriberId);
+    if (priorTicket) {
       return res.status(400).json({
         success: false,
-        message: 'Member is already enrolled in this chit group.',
+        message:
+          priorTicket.status === 'ACTIVE'
+            ? 'Member is already enrolled in this chit group.'
+            : `Member previously held ticket #${priorTicket.ticketNumber} in this chit group (${priorTicket.status}); re-enrolment is not supported.`,
       });
     }
 
-    if (group.members.length >= group.maxMembers) {
+    if (group.members.filter((m) => m.status === 'ACTIVE').length >= group.maxMembers) {
       return res.status(400).json({ success: false, message: 'Chit group has reached maximum member capacity' });
     }
 
@@ -390,7 +395,37 @@ export const getChitGroupDetails = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    return res.json({ success: true, data: group });
+    // Ticket status, prized flags and eligibility are derived from database records (P0, fixes E2).
+    const eligibility = await evaluateGroupEligibility(group.id);
+    const byMember = new Map(eligibility.tickets.map((t) => [t.memberId, t]));
+    const members = group.members
+      .map((m) => {
+        const e = byMember.get(m.id)!;
+        return {
+          ...m,
+          ticketNo: m.ticketNumber,
+          membershipStatus: m.status,
+          isPrized: e.isPrized,
+          prizedCount: e.prizedCount,
+          prizedInstallmentNo: e.prizedInstallmentNo,
+          prizedInstallmentNos: e.prizedInstallmentNos,
+          eligibleToWin: e.eligible,
+          eligibilityReasons: e.reasons,
+        };
+      })
+      .sort((a, b) => a.ticketNumber - b.ticketNumber);
+
+    return res.json({
+      success: true,
+      data: {
+        ...group,
+        members,
+        currentInstallmentNo: eligibility.nextInstallmentNo,
+        activeTickets: eligibility.activeTickets,
+        vacantSeats: eligibility.vacantSeats,
+        repeatWinPolicy: eligibility.repeatWinPolicy,
+      },
+    });
   } catch (err: any) {
     return sendError(res, err);
   }
@@ -419,7 +454,7 @@ export const updateChitGroup = async (req: AuthRequest, res: Response) => {
 
     const existingGroup = await prisma.chitGroup.findUnique({
       where: { id },
-      include: { _count: { select: { transactions: true, auctions: true, members: true } } },
+      include: { _count: { select: { transactions: true, auctions: true, members: { where: { status: 'ACTIVE' } } } } },
     });
 
     if (!existingGroup) {

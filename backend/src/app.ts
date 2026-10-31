@@ -162,6 +162,9 @@ router.patch('/collections/:id/photo', authenticateToken, collectionController.u
 
 // Auction Routes (AC-23, AC-24, AC-25)
 router.post('/auctions/confirm', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), auctionController.createAuctionResult);
+router.post('/auctions/preview', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), auctionController.previewAuctionResult);
+router.get('/auctions/dividend-allocations/pending', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), auctionController.listPendingDividendAllocations);
+router.get('/auctions/group/:groupId/eligibility', authenticateToken, auctionController.getGroupEligibility);
 router.get('/auctions/group/:groupId', authenticateToken, auctionController.getGroupAuctions);
 
 // Payout & Refund Routes (AC-26, AC-27, AC-28)

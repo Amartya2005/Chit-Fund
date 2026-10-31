@@ -474,6 +474,7 @@ export const deleteCompany = async (req: AuthRequest, res: Response) => {
               ],
             },
           }).catch(() => {});
+          await tx.auctionDividendAllocation.deleteMany({ where: { companyId: id } }).catch(() => {});
           await tx.auction.deleteMany({ where: { groupId: { in: chitGroupIds } } }).catch(() => {});
           await tx.chitGroupStaff.deleteMany({ where: { groupId: { in: chitGroupIds } } }).catch(() => {});
           await tx.chitGroupMember.deleteMany({ where: { groupId: { in: chitGroupIds } } }).catch(() => {});
@@ -1284,7 +1285,7 @@ const complianceChecklists = [
 ];
 
 export const getComplianceRecords = async (req: AuthRequest, res: Response) => {
-  return res.json({ success: true, data: complianceChecklists });
+  return res.json({ success: true, dataQuality: { status: 'DEMONSTRATION', notes: ['Compliance checklist entries are held in memory and are sample values; they are not persisted or verified.'] }, data: complianceChecklists });
 };
 
 export const createComplianceRecord = async (req: AuthRequest, res: Response) => {
@@ -1334,6 +1335,15 @@ export const getSuperAdminComplianceReports = async (req: AuthRequest, res: Resp
 
     return res.json({
       success: true,
+      // P0 (E9): statutory statuses below (forms, reserve-fund lien, checklist) are static
+      // demonstration values, not records verified by the system. Counts are live.
+      dataQuality: {
+        status: 'DEMONSTRATION',
+        notes: [
+          'Subscriber, KYC, chit group, transaction and audit-log counts are read from the database.',
+          'Statutory form statuses, reserve-fund lien and compliance checklist entries are static sample values and have not been verified.',
+        ],
+      },
       data: {
         score: complianceScore,
         summary: {

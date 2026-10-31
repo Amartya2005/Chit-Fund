@@ -169,18 +169,27 @@ model ChitGroupStaff {
 }
 
 model ChitGroupMember {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
   groupId      String
   subscriberId String
   ticketNumber Int // Ticket number e.g. 1 to 20
-  enrolledAt   DateTime @default(now())
+  enrolledAt   DateTime  @default(now())
+  // Ticket lifecycle (P0): rows are never deleted on surrender; history is preserved.
+  status       String    @default("ACTIVE") // ACTIVE | SURRENDERED | EXITED
+  exitedAt     DateTime?
+  exitReason   String?
+  exitRefundId String? // Refund (surrender) that ended this membership
 
   group      ChitGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
   subscriber Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
 
+  auctionsWon         Auction[]
+  dividendAllocations AuctionDividendAllocation[]
+
   @@unique([groupId, ticketNumber])
   @@unique([groupId, subscriberId])
   @@index([subscriberId])
+  @@index([groupId, status])
 }
 
 model InstallmentSchedule {
@@ -259,18 +268,52 @@ model Auction {
   dividendPerMember  Decimal  @db.Decimal(15, 2) // totalDividend / maxMembers
   winnerSubscriberId String
   winningTicketNo    Int
+  winnerMemberId     String? // ChitGroupMember (ticket) that won; null for auctions recorded before P0
   status             String   @default("CONFIRMED") // SCHEDULED, IN_PROGRESS, CONFIRMED, CANCELLED
   notes              String?
+  calculation        Json? // Calculation inputs + step-by-step breakdown (P0); null for auctions recorded before P0
+  calculationVersion String?
   createdAt          DateTime @default(now())
 
-  group            ChitGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  winnerSubscriber Subscriber @relation("AuctionWinner", fields: [winnerSubscriberId], references: [id])
+  group            ChitGroup        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  winnerSubscriber Subscriber       @relation("AuctionWinner", fields: [winnerSubscriberId], references: [id])
+  winnerMember     ChitGroupMember? @relation(fields: [winnerMemberId], references: [id], onDelete: Restrict)
 
-  bids   AuctionBid[]
-  payout Payout?
+  bids                AuctionBid[]
+  payout              Payout?
+  dividendAllocations AuctionDividendAllocation[]
 
   @@unique([groupId, installmentNo])
   @@index([winnerSubscriberId])
+  @@index([winnerMemberId])
+}
+
+// Where every rupee of an auction's dividend pool went (P0).
+// The sum of all rows of an auction equals Auction.totalDividend exactly.
+// Amounts the existing distribution rule does not reach (unfilled seats, rounding
+// remainder, final auction without a next instalment) are kept as PENDING_DECISION
+// rows instead of being discarded.
+model AuctionDividendAllocation {
+  id                  String   @id @default(uuid())
+  companyId           String
+  auctionId           String
+  allocationKey       String // "TICKET:<memberId>" | "VACANT_SEATS" | "ROUNDING_REMAINDER" | "NO_NEXT_INSTALLMENT" (non-null => unique key always enforced)
+  kind                String // TICKET_CREDIT | VACANT_SEATS | ROUNDING_REMAINDER | NO_NEXT_INSTALLMENT
+  memberId            String?
+  subscriberId        String?
+  ticketNumber        Int?
+  amount              Decimal  @db.Decimal(15, 2)
+  targetInstallmentNo Int?
+  status              String // CREDITED_TO_INSTALLMENT | PENDING_DECISION
+  note                String?
+  createdAt           DateTime @default(now())
+
+  auction Auction          @relation(fields: [auctionId], references: [id], onDelete: Restrict)
+  member  ChitGroupMember? @relation(fields: [memberId], references: [id], onDelete: Restrict)
+
+  @@unique([auctionId, allocationKey])
+  @@index([companyId, status])
+  @@index([memberId])
 }
 
 model AuctionBid {

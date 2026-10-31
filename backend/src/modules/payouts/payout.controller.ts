@@ -293,43 +293,47 @@ export const processRefund = async (req: AuthRequest, res: Response) => {
       updatedReason += ` | Rejection Reason: ${String(rejectionReason).trim().slice(0, 1000)}`;
     }
 
-    const updated = await prisma.refund.update({
-      where: { id },
-      data: {
-        status,
-        reason: updatedReason,
-        approvedByUserId: status === 'APPROVED' || status === 'DISBURSED' ? userId : refund.approvedByUserId,
-        approvedAt: status === 'APPROVED' ? new Date() : refund.approvedAt,
-        disbursedAt: status === 'DISBURSED' ? new Date() : refund.disbursedAt,
-      },
-    });
-
-    // When manager APPROVES the surrender:
-    // Surrender member from the chit group so future installment calculation stops!
-    if (status === 'APPROVED' || status === 'DISBURSED') {
-      await prisma.chitGroupMember.deleteMany({
-        where: {
-          groupId: refund.groupId,
-          subscriberId: refund.subscriberId,
+    // Refund status, ticket surrender and audit log are committed atomically.
+    const updated = await prisma.$transaction(async (tx) => {
+      const refundRow = await tx.refund.update({
+        where: { id },
+        data: {
+          status,
+          reason: updatedReason,
+          approvedByUserId: status === 'APPROVED' || status === 'DISBURSED' ? userId : refund.approvedByUserId,
+          approvedAt: status === 'APPROVED' ? new Date() : refund.approvedAt,
+          disbursedAt: status === 'DISBURSED' ? new Date() : refund.disbursedAt,
         },
       });
-    }
 
-    await prisma.auditLog.create({
-      data: {
-        companyId: refund.companyId,
-        userId,
-        action: `SURRENDER_REFUND_${status}`,
-        entity: 'Refund',
-        entityId: refund.id,
-        details: JSON.stringify({
-          previousStatus: refund.status,
-          newStatus: status,
-          groupId: refund.groupId,
-          subscriberId: refund.subscriberId,
-          amount: refund.amount,
-        }),
-      },
+      // When the manager approves the surrender the ticket stops participating (future instalment
+      // calculation stops, cannot win auctions). P0: the membership row is KEPT with status
+      // SURRENDERED instead of being deleted, so ticket history, prized status and contributions remain.
+      if (status === 'APPROVED' || status === 'DISBURSED') {
+        await tx.chitGroupMember.updateMany({
+          where: { groupId: refund.groupId, subscriberId: refund.subscriberId, status: 'ACTIVE' },
+          data: { status: 'SURRENDERED', exitedAt: new Date(), exitReason: 'SURRENDER_APPROVED', exitRefundId: refund.id },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          companyId: refund.companyId,
+          userId,
+          action: `SURRENDER_REFUND_${status}`,
+          entity: 'Refund',
+          entityId: refund.id,
+          details: JSON.stringify({
+            previousStatus: refund.status,
+            newStatus: status,
+            groupId: refund.groupId,
+            subscriberId: refund.subscriberId,
+            amount: refund.amount,
+          }),
+        },
+      });
+
+      return refundRow;
     });
 
     return res.json({

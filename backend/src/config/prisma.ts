@@ -33,6 +33,7 @@ export const DECIMAL_FIELDS: Record<string, readonly string[]> = {
   Refund: ['amount'],
   KhataCustomer: ['openingBalance'],
   KhataTransaction: ['amount'],
+  AuctionDividendAllocation: ['amount'],
 };
 
 function createClient() {
@@ -78,6 +79,7 @@ function createClient() {
       refund: { amount: decimalField('amount') },
       khataCustomer: { openingBalance: decimalField('openingBalance') },
       khataTransaction: { amount: decimalField('amount') },
+      auctionDividendAllocation: { amount: decimalField('amount') },
     },
   });
 }

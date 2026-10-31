@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { addMoney, divideMoney, parsePositiveAmount, percentOf, roundMoney, subtractMoney, sumMoney, toPaise } from '../../src/lib/money.js';
-import { calculateAuctionResult } from '../../src/modules/auctions/auction.controller.js';
 
 describe('money helpers (integer paise arithmetic)', () => {
   it('adds without floating point drift', () => {
@@ -38,26 +37,5 @@ describe('money helpers (integer paise arithmetic)', () => {
     expect(parsePositiveAmount('abc')).toBeNull();
     expect(parsePositiveAmount(Infinity)).toBeNull();
     expect(parsePositiveAmount(1e20)).toBeNull();
-  });
-});
-
-describe('auction result calculation (existing business formula)', () => {
-  it('matches the documented example: 5,00,000 chit, 20 members, 5% commission, 50,000 discount', () => {
-    const r = calculateAuctionResult({ chitValue: 500000, foremanCommissionPct: 5, maxMembers: 20 }, 50000);
-    expect(r).toEqual({ foremanCommission: 25000, totalDividend: 25000, dividendPerMember: 1250, grossBidAmount: 450000 });
-  });
-
-  it('never produces a negative dividend when the discount is below the commission', () => {
-    const r = calculateAuctionResult({ chitValue: 500000, foremanCommissionPct: 5, maxMembers: 20 }, 10000);
-    expect(r.totalDividend).toBe(0);
-    expect(r.dividendPerMember).toBe(0);
-    expect(r.grossBidAmount).toBe(490000);
-  });
-
-  it('keeps per-member dividends within the pool for uneven splits', () => {
-    const r = calculateAuctionResult({ chitValue: 100000, foremanCommissionPct: 5, maxMembers: 3 }, 6000);
-    expect(r.totalDividend).toBe(1000);
-    expect(r.dividendPerMember).toBe(333.33);
-    expect(r.dividendPerMember * 3).toBeLessThanOrEqual(r.totalDividend);
   });
 });

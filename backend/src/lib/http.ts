@@ -3,7 +3,12 @@ import { Prisma } from '@prisma/client';
 
 /** An error whose message is safe to show to API clients. */
 export class HttpError extends Error {
-  constructor(public statusCode: number, message: string) {
+  constructor(
+    public statusCode: number,
+    message: string,
+    public code?: string,
+    public details?: unknown
+  ) {
     super(message);
     this.name = 'HttpError';
   }
@@ -23,7 +28,12 @@ export const notFound = (message = 'Record not found') => new HttpError(404, mes
  */
 export function sendError(res: Response, err: unknown) {
   if (err instanceof HttpError) {
-    return res.status(err.statusCode).json({ success: false, message: err.message });
+    return res.status(err.statusCode).json({
+      success: false,
+      message: err.message,
+      ...(err.code ? { code: err.code } : {}),
+      ...(err.details !== undefined ? { details: err.details } : {}),
+    });
   }
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002') {

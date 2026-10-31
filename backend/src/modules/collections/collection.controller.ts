@@ -106,10 +106,15 @@ export const recordPayment = async (req: AuthRequest, res: Response) => {
       prisma.chitGroupMember.findUnique({ where: { groupId_subscriberId: { groupId: group.id, subscriberId: subscriber.id } } }),
       prisma.paymentTransaction.count({ where: { groupId: group.id, subscriberId: subscriber.id } }),
     ]);
-    if (!membership && priorTxCount === 0) {
+    // Active tickets can pay; a ticket that is no longer active (surrendered) can still settle
+    // earlier dues only if it has payment history in the group (same as before P0, when the
+    // membership row was deleted on surrender).
+    if (!(membership && membership.status === 'ACTIVE') && priorTxCount === 0) {
       return res.status(400).json({
         success: false,
-        message: `Member ${subscriber.fullName} is not enrolled in chit group "${group.name}".`,
+        message: membership
+          ? `Ticket #${membership.ticketNumber} of ${subscriber.fullName} in chit group "${group.name}" is ${membership.status.toLowerCase()}.`
+          : `Member ${subscriber.fullName} is not enrolled in chit group "${group.name}".`,
       });
     }
 

@@ -265,14 +265,15 @@ describe('8-9. auction result entry and payout management', () => {
     expect(res.body.data[0].payout.netPayoutAmount).toBe(83765.44);
   });
 
-  it('surrender / refund: staff submits, manager approves, membership removed', async () => {
+  it('surrender / refund: staff submits, manager approves, ticket marked SURRENDERED (history kept)', async () => {
     const create = await api().post('/api/v1/refunds').set(bearer(staffToken)).send({ subscriberId: members[3].id, groupId, amount: 5000, reason: 'Moving city' });
     expect(create.status).toBe(201);
     expect(create.body.data.status).toBe('SUBMITTED_TO_MANAGER');
     const approve = await api().patch(`/api/v1/refunds/${create.body.data.id}/process`).set(bearer(managerToken)).send({ status: 'APPROVED' });
     expect(approve.status).toBe(200);
     const membership = await prisma.chitGroupMember.findFirst({ where: { groupId, subscriberId: members[3].id } });
-    expect(membership).toBeNull();
+    expect(membership?.status).toBe('SURRENDERED');
+    expect(membership?.exitRefundId).toBe(create.body.data.id);
     const disburse = await api().patch(`/api/v1/refunds/${create.body.data.id}/process`).set(bearer(managerToken)).send({ status: 'DISBURSED' });
     expect(disburse.status).toBe(200);
     expect((await api().patch(`/api/v1/refunds/${create.body.data.id}/process`).set(bearer(managerToken)).send({ status: 'APPROVED' })).status).toBe(400);

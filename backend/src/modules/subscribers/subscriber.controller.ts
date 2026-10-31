@@ -2,7 +2,8 @@ import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
 import { sendError, notFound } from '../../lib/http.js';
-import { roundMoney, sumMoney, subtractMoney } from '../../lib/money.js';
+import { addMoney, roundMoney, sumMoney, subtractMoney } from '../../lib/money.js';
+import { evaluateInstallments, resolveAsOf } from './arrears.js';
 import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
 import {
   assertUsersInCompany,
@@ -12,6 +13,22 @@ import {
   requireWriteCompanyId,
   staffGroupIds as loadStaffGroupIds,
 } from '../../security/tenant.js';
+
+/**
+ * `memberships` keeps its historical meaning (current tickets). Tickets that were surrendered or
+ * exited are no longer deleted (P0); they are returned separately as `exitedMemberships`.
+ */
+function splitMemberships<T extends { memberships?: { status: string }[] }>(sub: T) {
+  if (!sub || !sub.memberships) return sub;
+  return {
+    ...sub,
+    memberships: sub.memberships.filter((m) => m.status === 'ACTIVE'),
+    exitedMemberships: sub.memberships.filter((m) => m.status !== 'ACTIVE'),
+  };
+}
+
+const activeCount = (members: { status: string }[]) => members.filter((m) => m.status === 'ACTIVE').length;
+const nextTicketNumber = (members: { ticketNumber: number }[]) => members.reduce((max, m) => Math.max(max, m.ticketNumber), 0) + 1;
 
 export const listSubscribers = async (req: AuthRequest, res: Response) => {
   try {
@@ -46,6 +63,7 @@ export const listSubscribers = async (req: AuthRequest, res: Response) => {
         memberships: {
           some: {
             groupId: { in: staffGroupIds },
+            status: 'ACTIVE',
           },
         },
       });
@@ -80,7 +98,7 @@ export const listSubscribers = async (req: AuthRequest, res: Response) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    return res.json({ success: true, count: subscribers.length, data: subscribers });
+    return res.json({ success: true, count: subscribers.length, data: subscribers.map(splitMemberships) });
   } catch (err: any) {
     return sendError(res, err);
   }
@@ -160,7 +178,7 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
         }
       }
 
-      if (targetGroup.members.length >= targetGroup.maxMembers) {
+      if (activeCount(targetGroup.members) >= targetGroup.maxMembers) {
         return res.status(400).json({
           success: false,
           message: `Chit group ${targetGroup.name} has reached maximum member capacity (${targetGroup.maxMembers}).`,
@@ -199,22 +217,25 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
         }
 
         // Check if member already enrolled in THIS group
-        const alreadyInGroup = targetGroup.members.some((m) => m.subscriberId === existing.id);
-        if (alreadyInGroup) {
+        const priorTicket = targetGroup.members.find((m) => m.subscriberId === existing.id);
+        if (priorTicket) {
           return res.status(400).json({
             success: false,
-            message: `Member "${existing.fullName}" (${existing.subscriberCode}) is already enrolled in chit group "${targetGroup.name}".`,
+            message:
+              priorTicket.status === 'ACTIVE'
+                ? `Member "${existing.fullName}" (${existing.subscriberCode}) is already enrolled in chit group "${targetGroup.name}".`
+                : `Member "${existing.fullName}" (${existing.subscriberCode}) previously held ticket #${priorTicket.ticketNumber} in chit group "${targetGroup.name}" (${priorTicket.status}); re-enrolment is not supported.`,
           });
         }
 
-        if (targetGroup.members.length >= targetGroup.maxMembers) {
+        if (activeCount(targetGroup.members) >= targetGroup.maxMembers) {
           return res.status(400).json({
             success: false,
             message: `Chit group ${targetGroup.name} has reached maximum member capacity (${targetGroup.maxMembers}).`,
           });
         }
 
-        const ticketNumber = targetGroup.members.reduce((max, m) => Math.max(max, m.ticketNumber), 0) + 1;
+        const ticketNumber = nextTicketNumber(targetGroup.members);
         await prisma.chitGroupMember.create({
           data: {
             groupId,
@@ -248,7 +269,7 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
         return res.status(200).json({
           success: true,
           message: `Member "${existing.fullName}" (${existing.subscriberCode}) enrolled into group "${targetGroup.name}" with Ticket #${ticketNumber}!`,
-          data: updatedExisting,
+          data: splitMemberships(updatedExisting as any),
           alreadyRegistered: true,
         });
       }
@@ -324,7 +345,7 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
 
     // If Manager created and groupId specified, assign immediately
     if (!isStaff && groupId && targetGroup) {
-      const ticketNumber = targetGroup.members.reduce((max: number, m: any) => Math.max(max, m.ticketNumber), 0) + 1;
+      const ticketNumber = nextTicketNumber(targetGroup.members);
       await prisma.chitGroupMember.create({
         data: {
           groupId,
@@ -382,7 +403,7 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
       },
     });
 
-    return res.status(201).json({ success: true, data: freshSubscriber });
+    return res.status(201).json({ success: true, data: splitMemberships(freshSubscriber as any) });
   } catch (err: any) {
     return sendError(res, err);
   }
@@ -476,8 +497,8 @@ export const verifyKyc = async (req: AuthRequest, res: Response) => {
           include: { members: true },
         });
 
-        if (targetGroup && targetGroup.members.length < targetGroup.maxMembers) {
-          const ticketNumber = targetGroup.members.reduce((max, m) => Math.max(max, m.ticketNumber), 0) + 1;
+        if (targetGroup && activeCount(targetGroup.members) < targetGroup.maxMembers) {
+          const ticketNumber = nextTicketNumber(targetGroup.members);
           await prisma.chitGroupMember.create({
             data: {
               groupId: targetGroupId,
@@ -590,55 +611,50 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Calculate aggregated ledger lines
-    let totalScheduled = 0;
-    let totalDividends = 0;
-    let totalPaid = 0;
+    // Instalment states & arrears (P0: only instalments whose due date has passed are overdue).
+    const asOf = resolveAsOf(req.query.asOf);
+    const sum = { totalScheduled: 0, totalDividends: 0, netScheduledDue: 0, totalPaid: 0, totalArrears: 0, dueThroughAsOf: 0, dueToday: 0, upcoming: 0, overdueInstallments: 0 };
+    const add = (k: keyof typeof sum, v: number) => (sum[k] = k === 'overdueInstallments' ? sum[k] + v : addMoney(sum[k], v));
 
     const groupLedgers = subscriber.memberships.map((m) => {
-      const groupTxns = subscriber.transactions.filter(
-        (t) => t.groupId === m.groupId && t.verificationStatus === 'VERIFIED' && !t.isReversed
+      const groupTxns = subscriber.transactions.filter((t) => t.groupId === m.groupId);
+      const { rows, totals } = evaluateInstallments(
+        m.group.schedules,
+        groupTxns.map((t) => ({ installmentNo: t.installmentNo, amount: t.amount })),
+        asOf
       );
-      const paidInGroup = sumMoney(groupTxns.map((t) => t.amount));
-
-      const schedules = m.group.schedules.map((sch) => {
-        totalScheduled = sumMoney([totalScheduled, sch.scheduledAmount]);
-        totalDividends = sumMoney([totalDividends, sch.dividendAmount]);
-        const matchingTxns = groupTxns.filter((t) => t.installmentNo === sch.installmentNo);
-        const installmentPaid = sumMoney(matchingTxns.map((t) => t.amount));
-        const outstanding = Math.max(0, subtractMoney(sch.netDueAmount, installmentPaid));
-
-        return {
-          installmentNo: sch.installmentNo,
-          dueDate: sch.dueDate,
-          scheduledAmount: sch.scheduledAmount,
-          dividendAmount: sch.dividendAmount,
-          netDueAmount: sch.netDueAmount,
-          paidAmount: installmentPaid,
-          outstanding,
-          status: outstanding === 0 ? 'PAID' : installmentPaid > 0 ? 'PARTIAL' : 'DUE',
-        };
-      });
-
-      totalPaid = sumMoney([totalPaid, paidInGroup]);
-
+      const counts = m.status === 'ACTIVE';
+      if (counts) {
+        add('totalScheduled', sumMoney(m.group.schedules.map((x) => x.scheduledAmount)));
+        add('totalDividends', sumMoney(m.group.schedules.map((x) => x.dividendAmount)));
+        add('netScheduledDue', totals.totalScheduledNet);
+        add('totalPaid', totals.paidTotal);
+        add('totalArrears', totals.overdue);
+        add('dueThroughAsOf', totals.dueThroughAsOf);
+        add('dueToday', totals.dueToday);
+        add('upcoming', totals.upcomingNet);
+        add('overdueInstallments', totals.overdueInstallments);
+      }
       return {
+        groupId: m.groupId,
         groupCode: m.group.groupCode,
         groupName: m.group.name,
         ticketNumber: m.ticketNumber,
+        membershipStatus: m.status,
+        exitedAt: m.exitedAt,
+        countsTowardSummary: counts,
         chitValue: m.group.chitValue,
         monthlyInstallment: m.group.monthlyInstallment,
-        totalPaidInGroup: paidInGroup,
-        schedules,
+        totalPaidInGroup: totals.paidTotal,
+        overdueInGroup: totals.overdue,
+        schedules: rows,
       };
     });
-
-    const netScheduledDue = subtractMoney(totalScheduled, totalDividends);
-    const totalArrears = Math.max(0, subtractMoney(netScheduledDue, totalPaid));
 
     return res.json({
       success: true,
       data: {
+        asOf,
         subscriber: {
           id: subscriber.id,
           subscriberCode: subscriber.subscriberCode,
@@ -646,13 +662,7 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
           phone: subscriber.phone,
           kycStatus: subscriber.kycStatus,
         },
-        summary: {
-          totalScheduled,
-          totalDividends,
-          netScheduledDue,
-          totalPaid,
-          totalArrears,
-        },
+        summary: sum,
         groups: groupLedgers,
         transactions: subscriber.transactions,
       },
@@ -708,7 +718,8 @@ export const getMemberStatement = async (req: AuthRequest, res: Response) => {
         generatedAt: new Date().toISOString(),
         subscriber,
         totalPaid,
-        activeChitsCount: subscriber.memberships.length,
+        activeChitsCount: subscriber.memberships.filter((m) => m.status === 'ACTIVE').length,
+        exitedChitsCount: subscriber.memberships.filter((m) => m.status !== 'ACTIVE').length,
         payoutsReceivedCount: subscriber.payouts.filter((p) => p.status === 'DISBURSED').length,
       },
     });
@@ -720,81 +731,83 @@ export const getMemberStatement = async (req: AuthRequest, res: Response) => {
 /**
  * AC-30: Outstanding & Arrears Management
  */
+/**
+ * Outstanding & arrears per subscriber (P0 fix of E7). Only ACTIVE tickets count; an instalment
+ * is in arrears only after its due date has passed (see ./arrears.ts). The 2% figure is the
+ * existing display-only indication; it is not charged or posted anywhere (decision D-22).
+ */
+export async function buildOutstandingList(where: any, asOf: string) {
+  const subscribers = await prisma.subscriber.findMany({
+    where,
+    include: {
+      memberships: {
+        where: { status: 'ACTIVE' },
+        include: { group: { include: { schedules: true } } },
+      },
+      transactions: {
+        where: { isReversed: false, verificationStatus: 'VERIFIED' },
+        select: { groupId: true, installmentNo: true, amount: true },
+      },
+    },
+  });
+
+  return subscribers.map((sub) => {
+    let totalDue = 0;
+    let totalPaid = 0;
+    let arrears = 0;
+    let dueToday = 0;
+    let upcoming = 0;
+    let overdueInstallments = 0;
+    for (const m of sub.memberships) {
+      const { totals } = evaluateInstallments(
+        m.group.schedules,
+        sub.transactions.filter((t) => t.groupId === m.groupId),
+        asOf
+      );
+      totalDue = addMoney(totalDue, totals.dueThroughAsOf);
+      totalPaid = addMoney(totalPaid, totals.paidTotal);
+      arrears = addMoney(arrears, totals.overdue);
+      dueToday = addMoney(dueToday, totals.dueToday);
+      upcoming = addMoney(upcoming, totals.upcomingNet);
+      overdueInstallments += totals.overdueInstallments;
+    }
+    const lateFee = arrears > 0 ? Math.round(arrears * 0.02) : 0; // existing indicative 2% (not charged)
+    return {
+      id: sub.id,
+      subscriberCode: sub.subscriberCode,
+      fullName: sub.fullName,
+      phone: sub.phone,
+      enrolledGroupsCount: sub.memberships.length,
+      totalDue,
+      totalPaid,
+      arrears,
+      dueToday,
+      upcoming,
+      overdueInstallments,
+      lateFee,
+      lateFeeIsIndicative: true,
+      totalPayable: roundMoney(arrears + lateFee),
+      status: arrears === 0 ? 'CLEAN' : arrears < 10000 ? 'MILD_ARREARS' : 'CRITICAL_ARREARS',
+    };
+  });
+}
+
 export const getMemberOutstanding = async (req: AuthRequest, res: Response) => {
   try {
+    const asOf = resolveAsOf(req.query.asOf);
     const { companyId } = companyWhere(req);
     const where: any = { ...(companyId ? { companyId } : {}), status: 'ACTIVE' };
 
     // Staff can only view outstanding for their assigned chit group members
     if (req.user?.role === 'COLLECTION_STAFF') {
-      const staffUserId = req.user.id;
-      const staffGroups = await prisma.chitGroup.findMany({
-        where: {
-          ...(companyId ? { companyId } : {}),
-          OR: [
-            { assignedStaffId: staffUserId },
-            { staffAssignments: { some: { staffId: staffUserId } } },
-          ],
-        },
-        select: { id: true },
-      });
-      const staffGroupIds = staffGroups.map((g) => g.id);
-      where.memberships = {
-        some: {
-          groupId: { in: staffGroupIds },
-        },
-      };
+      const staffGroupIds = await loadStaffGroupIds(req);
+      where.memberships = { some: { groupId: { in: staffGroupIds }, status: 'ACTIVE' } };
     }
 
-    const subscribers = await prisma.subscriber.findMany({
-      where,
-      include: {
-        memberships: {
-          include: {
-            group: {
-              include: { schedules: true },
-            },
-          },
-        },
-        transactions: {
-          where: { isReversed: false, verificationStatus: 'VERIFIED' },
-          select: { groupId: true, installmentNo: true, amount: true, verificationStatus: true },
-        },
-      },
-    });
-
-    const outstandingList = subscribers.map((sub) => {
-      let totalDue = 0;
-      let totalPaid = 0;
-
-      for (const m of sub.memberships) {
-        totalDue = sumMoney([totalDue, ...m.group.schedules.map((sch) => sch.netDueAmount)]);
-        const groupTxns = sub.transactions.filter(
-          (t) => t.groupId === m.groupId && (t as any).verificationStatus === 'VERIFIED'
-        );
-        totalPaid = sumMoney([totalPaid, ...groupTxns.map((t) => t.amount)]);
-      }
-
-      const arrears = Math.max(0, subtractMoney(totalDue, totalPaid));
-      const lateFee = arrears > 0 ? Math.round(arrears * 0.02) : 0; // 2% late charge rule (unchanged)
-
-      return {
-        id: sub.id,
-        subscriberCode: sub.subscriberCode,
-        fullName: sub.fullName,
-        phone: sub.phone,
-        enrolledGroupsCount: sub.memberships.length,
-        totalDue,
-        totalPaid,
-        arrears,
-        lateFee,
-        totalPayable: roundMoney(arrears + lateFee),
-        status: arrears === 0 ? 'CLEAN' : arrears < 10000 ? 'MILD_ARREARS' : 'CRITICAL_ARREARS',
-      };
-    });
-
+    const outstandingList = await buildOutstandingList(where, asOf);
     return res.json({
       success: true,
+      asOf,
       count: outstandingList.length,
       data: outstandingList.sort((a, b) => b.arrears - a.arrears),
     });

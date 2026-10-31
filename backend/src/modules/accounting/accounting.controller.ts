@@ -3,10 +3,24 @@ import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
 import { addMoney, parsePositiveAmount, toPaise, fromPaise, subtractMoney } from '../../lib/money.js';
 import { sendError, notFound } from '../../lib/http.js';
+import { buildOutstandingList } from '../subscribers/subscriber.controller.js';
+import { todayInIndia } from '../subscribers/arrears.js';
 import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
 import { assertSameCompany, companyScope, requireWriteCompanyId } from '../../security/tenant.js';
 
 const ACCOUNT_TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'INCOME', 'EXPENSE'];
+
+/**
+ * P0 (E8): figures that cannot be derived from reliable database records are returned as
+ * `null` and listed in `unavailable`, instead of hard-coded sample values. They become
+ * available once the accounting engine (ledger posting + cut-over, roadmap P4) exists.
+ */
+const PENDING_ACCOUNTING = 'UNAVAILABLE_PENDING_ACCOUNTING_ENGINE';
+const dataQuality = (unavailable: string[], notes: string[] = []) => ({
+  status: unavailable.length ? 'PARTIAL' : 'COMPLETE',
+  unavailable: unavailable.map((field) => ({ field, reason: PENDING_ACCOUNTING })),
+  notes,
+});
 
 /**
  * Standard Chart of Accounts template for Chit Fund Company
@@ -292,11 +306,13 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
     const totalExpenses = expenses.reduce((sum, e) => addMoney(sum, e.amount), 0);
     const totalPayouts = payouts.reduce((sum, p) => addMoney(sum, p.netPayoutAmount), 0);
     const totalRefunds = refunds.reduce((sum, r) => addMoney(sum, r.amount), 0);
-    const totalCashOut = totalExpenses + totalPayouts + totalRefunds;
+    const totalCashOut = addMoney(addMoney(totalExpenses, totalPayouts), totalRefunds);
 
-    const openingBalance = 50000; // Base opening balance
-    const netCashFlow = totalCashIn - totalCashOut;
-    const closingBalance = openingBalance + netCashFlow;
+    // Opening/closing cash balances require a ledger opening balance (not recorded yet).
+    // The previous hard-coded opening balance of ₹50,000 was sample data and is no longer returned.
+    const openingBalance = null;
+    const netCashFlow = subtractMoney(totalCashIn, totalCashOut);
+    const closingBalance = null;
 
     // Day-by-Day (Each Date) Aggregate Breakdown
     const dailyMap: Record<
@@ -378,6 +394,9 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
           openingBalance,
           closingBalance,
         },
+        dataQuality: dataQuality(['summary.openingBalance', 'summary.closingBalance'], [
+          'Cash in/out figures are computed from recorded collections, expenses, disbursed payouts and refunds.',
+        ]),
         dailyBreakdown,
         cashReceipts: allReceipts,
         cashExpenses: expenses,
@@ -432,20 +451,20 @@ export const getBankbook = async (req: AuthRequest, res: Response) => {
 
     const totalDeposits = bankCollections.reduce((sum, t) => addMoney(sum, t.amount), 0);
     const totalWithdrawals = bankDisbursements.reduce((sum, p) => addMoney(sum, p.netPayoutAmount), 0);
-    const openingBalance = 250000;
-    const closingBalance = openingBalance + totalDeposits - totalWithdrawals;
-
+    // Previously: opening balance ₹2,50,000 and a 70/30 split into two fictional bank accounts
+    // (sample data). Bank balances need ledger opening balances and real bank accounts.
     return res.json({
       success: true,
       data: {
-        bankAccounts: [
-          { name: 'HDFC Operational Pool A/C', accNumber: 'XXXX-9872', balance: closingBalance * 0.7 },
-          { name: 'SBI Registrar Reserve A/C', accNumber: 'XXXX-4311', balance: closingBalance * 0.3 },
-        ],
-        openingBalance,
+        bankAccounts: [],
+        openingBalance: null,
         totalDeposits,
         totalWithdrawals,
-        closingBalance,
+        netMovement: subtractMoney(totalDeposits, totalWithdrawals),
+        closingBalance: null,
+        dataQuality: dataQuality(['bankAccounts', 'openingBalance', 'closingBalance'], [
+          'Deposits = verified bank/UPI collections (latest 100); withdrawals = disbursed bank/cheque payouts (latest 50).',
+        ]),
         collections: bankCollections,
         disbursements: bankDisbursements,
       },
@@ -829,27 +848,19 @@ export const getFinancialStatements = async (req: AuthRequest, res: Response) =>
     // Calculate foreman commissions earned
     const foremanCommissionIncome = completedAuctions.reduce((s, a) => addMoney(s, a.foremanCommission), 0);
     const operationalExpenses = Number(totalExpenses._sum.amount || 0);
-    const defaultLateFees = 12500; // Sample late interest earned
-    const totalIncome = foremanCommissionIncome + defaultLateFees;
-    const netProfit = totalIncome - operationalExpenses;
+    // Late fees are not charged/recorded by the system (the previous ₹12,500 was sample data).
+    const totalIncome = foremanCommissionIncome;
+    const netProfit = subtractMoney(totalIncome, operationalExpenses);
 
-    // Balance Sheet items
-    const cashOnHand = 74500;
-    const bankBalance = 385000;
-    const subscriberReceivables = 142000;
-    const totalAssets = cashOnHand + bankBalance + subscriberReceivables;
-
-    const prizeMoneyPayable = 95000;
-    const totalLiabilities = prizeMoneyPayable;
-    const equity = totalAssets - totalLiabilities;
-
+    // Balance sheet: previously fixed sample figures (cash ₹74,500, bank ₹3,85,000, receivables
+    // ₹1,42,000, prize payable ₹95,000). Not derivable until ledger posting exists.
     return res.json({
       success: true,
       data: {
         profitAndLoss: {
           income: [
-            { label: 'Foreman Commission Income', amount: foremanCommissionIncome },
-            { label: 'Late Fees & Arrears Interest', amount: defaultLateFees },
+            { label: 'Foreman Commission Income (recorded auctions)', amount: foremanCommissionIncome },
+            { label: 'Late Fees & Arrears Interest', amount: null },
           ],
           totalIncome,
           expenses: [
@@ -858,22 +869,10 @@ export const getFinancialStatements = async (req: AuthRequest, res: Response) =>
           totalExpenses: operationalExpenses,
           netProfit,
         },
-        balanceSheet: {
-          assets: [
-            { label: 'Cash on Hand (Vault Float)', amount: cashOnHand },
-            { label: 'Bank Balances (HDFC & SBI)', amount: bankBalance },
-            { label: 'Subscriber Installment Receivables', amount: subscriberReceivables },
-          ],
-          totalAssets,
-          liabilities: [
-            { label: 'Prize Money Payable to Winners', amount: prizeMoneyPayable },
-          ],
-          totalLiabilities,
-          equity: [
-            { label: 'Capital & Retained Reserves', amount: equity },
-          ],
-          totalEquity: equity,
-        },
+        balanceSheet: null,
+        dataQuality: dataQuality(['profitAndLoss.income[Late Fees]', 'balanceSheet'], [
+          'Profit & loss is computed from recorded auctions (commission) and expenses, not from a ledger; it is not an audited statement.',
+        ]),
       },
     });
   } catch (err: any) {
@@ -987,7 +986,7 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
     const groups = await prisma.chitGroup.findMany({
       where: { companyId },
       include: {
-        _count: { select: { members: true } },
+        _count: { select: { members: { where: { status: 'ACTIVE' } } } },
       },
     });
 
@@ -1030,8 +1029,10 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
     });
 
     const totalContributed = subscribersWithTotals.reduce((sum, s) => addMoney(sum, s.totalContributed), 0);
-    const totalArrears = 0;
-    const computedLateFees = 0;
+    // Arrears from the instalment engine (only instalments past their due date; P0 fix of E7).
+    const arrearsList = await buildOutstandingList({ companyId, status: 'ACTIVE' }, todayInIndia());
+    const totalArrears = arrearsList.reduce((sum, a) => addMoney(sum, a.arrears), 0);
+    const computedLateFees = null; // penalties are not charged/recorded by the system
 
     // 4. Expenses
     const expenses = await prisma.expense.findMany({
@@ -1091,13 +1092,21 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
         financialStatementsReport: {
           foremanCommissionIncome: totalForemanCommission,
           defaultLateFees: computedLateFees,
-          totalIncome: totalForemanCommission + computedLateFees,
+          totalIncome: totalForemanCommission,
           operationalExpenses: totalExpenses,
-          netProfit: totalForemanCommission + computedLateFees - totalExpenses,
-          totalAssets: totalDebits,
-          totalLiabilities: totalCredits - totalForemanCommission,
-          equity: totalDebits - (totalCredits - totalForemanCommission),
+          netProfit: subtractMoney(totalForemanCommission, totalExpenses),
+          // Previously derived by mixing account balances with commission (not a valid balance sheet).
+          totalAssets: null,
+          totalLiabilities: null,
+          equity: null,
         },
+        dataQuality: dataQuality(
+          ['membersArrearsReport.computedLateFees', 'financialStatementsReport.defaultLateFees', 'financialStatementsReport.totalAssets', 'financialStatementsReport.totalLiabilities', 'financialStatementsReport.equity'],
+          [
+            'trialBalanceReport reflects balances of MANUAL journal entries only; collections, auctions and payouts are not posted to the ledger yet.',
+            'Net profit = commission from recorded auctions − recorded expenses (not ledger-based).',
+          ]
+        ),
         trialBalanceReport: {
           totalDebits,
           totalCredits,
