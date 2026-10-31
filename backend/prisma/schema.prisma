@@ -39,15 +39,17 @@ model Company {
   sequences      CompanySequence[]
 
   // P2 configuration system. engineEnabled is an inert flag until engine groups exist (P5).
-  engineEnabled     Boolean                  @default(false)
+  engineEnabled       Boolean                  @default(false)
   // P4: ledger posting starts at this business date (D-19); null = automatic posting off
-  ledgerCutoverDate String?
-  accountMappings   AccountMapping[]
-  financialEvents   FinancialEvent[]
-  financialPeriods  FinancialPeriod[]
-  policyVersions    FinancialPolicyVersion[]
-  policyPointers    PolicyPointer[]
-  configSnapshots   ConfigSnapshot[]
+  ledgerCutoverDate   String?
+  // P7: members can sign in only when the super admin enables the portal for the company (D-02)
+  memberPortalEnabled Boolean                  @default(false)
+  accountMappings     AccountMapping[]
+  financialEvents     FinancialEvent[]
+  financialPeriods    FinancialPeriod[]
+  policyVersions      FinancialPolicyVersion[]
+  policyPointers      PolicyPointer[]
+  configSnapshots     ConfigSnapshot[]
 }
 
 model User {

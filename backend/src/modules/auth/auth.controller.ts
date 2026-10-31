@@ -213,6 +213,11 @@ export const login = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // P7: member logins work only while the company's member portal is enabled (decision D-02).
+    if (user.role === 'MEMBER' && !user.company?.memberPortalEnabled) {
+      return res.status(403).json({ success: false, code: 'MEMBER_PORTAL_DISABLED', message: 'Member access is not enabled for this company.' });
+    }
+
     // Company Status Enforcement: Block access if company is deleted
     if (
       user.role !== 'SUPER_ADMIN' &&

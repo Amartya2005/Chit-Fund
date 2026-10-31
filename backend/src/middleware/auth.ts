@@ -17,6 +17,15 @@ export interface AuthRequest extends Request {
 export const ROLES = ['SUPER_ADMIN', 'MANAGER', 'COLLECTION_STAFF'] as const;
 
 /**
+ * P7: subscribers with a member login. Not part of ROLES (the staff roles): generic user
+ * management can neither create nor assign it; member logins are created per subscriber
+ * (POST /engine/members/:subscriberId/login) and may only call the member API below.
+ */
+export const MEMBER_ROLE = 'MEMBER';
+const MEMBER_PATHS = ['/auth/logout', '/auth/change-password', '/auth/me', '/me/member', '/engine/member'];
+const memberPathAllowed = (path: string) => MEMBER_PATHS.some((p) => path === p || path.startsWith(`${p}/`));
+
+/**
  * Verifies the Bearer access token and loads the user from the database.
  *
  * Role and company are always taken from the database row, never from the token
@@ -74,6 +83,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
           select: {
             id: true,
             status: true,
+            memberPortalEnabled: true,
           },
         },
       },
@@ -83,8 +93,16 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       return res.status(403).json({ success: false, message: 'User account is inactive or disabled' });
     }
 
-    if (!(ROLES as readonly string[]).includes(user.role)) {
+    if (!(ROLES as readonly string[]).includes(user.role) && user.role !== MEMBER_ROLE) {
       return res.status(403).json({ success: false, message: 'User account has an unknown role' });
+    }
+    if (user.role === MEMBER_ROLE) {
+      if (!user.company?.memberPortalEnabled) {
+        return res.status(403).json({ success: false, code: 'MEMBER_PORTAL_DISABLED', message: 'Member access is not enabled for this company.' });
+      }
+      if (!memberPathAllowed(req.path)) {
+        return res.status(403).json({ success: false, code: 'MEMBER_SCOPE', message: 'Members can only use the member area.' });
+      }
     }
 
     // Non super-admin accounts must belong to a company

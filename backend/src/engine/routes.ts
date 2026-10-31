@@ -3,10 +3,12 @@ import { authenticateToken, requireRoles } from '../middleware/auth.js';
 import * as dues from './dues/dues.controller.js';
 import * as acct from './accounting/accounting.controller.js';
 import * as ses from './sessions/sessions.controller.js';
+import * as mem from './member/member.controller.js';
 
 const SA = 'SUPER_ADMIN';
 const M = 'MANAGER';
 const S = 'COLLECTION_STAFF';
+const MB = 'MEMBER';
 
 /** Engine routes (P3+). Mounted on the main API router. */
 export function registerEngineRoutes(router: Router) {
@@ -60,4 +62,13 @@ export function registerEngineRoutes(router: Router) {
   router.post('/engine/scheduler/run', ...auth(SA, M), ses.schedulerRun);
   // external cron: authenticated by the X-Cron-Secret header only (CRON_SECRET)
   router.post('/engine/scheduler/cron', ses.cronRun);
+
+  // P7 — member portal (MEMBER logins are additionally confined to these paths by authenticateToken)
+  router.patch('/engine/companies/:id/member-portal', ...auth(SA), mem.setMemberPortal);
+  router.post('/engine/members/:subscriberId/login', ...auth(SA, M), mem.createMemberLogin);
+  router.get('/me/member/summary', ...auth(MB), mem.memberSummary);
+  router.get('/me/member/dues', ...auth(MB), mem.memberDues);
+  router.get('/me/member/auctions', ...auth(MB), mem.memberAuctions);
+  router.get('/me/member/dividends', ...auth(MB), mem.memberDividends);
+  router.get('/me/member/payments', ...auth(MB), mem.memberPayments);
 }
