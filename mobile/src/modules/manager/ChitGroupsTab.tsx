@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { api } from '../../services/api';
 import { mStyles } from './commonStyles';
+import { FinancialSettingsModal } from './FinancialSettingsModal';
 
 export function ChitGroupsTab({ user }: { user: any }) {
   const [groups, setGroups] = useState<any[]>([]);
@@ -29,6 +30,7 @@ export function ChitGroupsTab({ user }: { user: any }) {
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [showViewMembersModal, setShowViewMembersModal] = useState(false);
+  const [settingsGroup, setSettingsGroup] = useState<any>(null);
 
   const [selectedGroup, setSelectedGroup] = useState<any>(null);
   const [selectedViewGroup, setSelectedViewGroup] = useState<any>(null);
@@ -802,6 +804,14 @@ export function ChitGroupsTab({ user }: { user: any }) {
                   <Text style={mStyles.secondaryBtnText}>📅 Schedules</Text>
                 </TouchableOpacity>
 
+                <TouchableOpacity
+                  style={[mStyles.secondaryBtn, { paddingVertical: 8, paddingHorizontal: 12 }]}
+                  onPress={() => setSettingsGroup(grp)}
+                  accessibilityLabel={`Financial settings for ${grp.name}`}
+                >
+                  <Text style={mStyles.secondaryBtnText}>⚙️ Financial Settings</Text>
+                </TouchableOpacity>
+
                 {isManagerOrAdmin && (
                   <>
                     <TouchableOpacity
@@ -831,6 +841,8 @@ export function ChitGroupsTab({ user }: { user: any }) {
           );
         })
       )}
+
+      <FinancialSettingsModal group={settingsGroup} visible={!!settingsGroup} onClose={() => setSettingsGroup(null)} canSeeHistory={isManagerOrAdmin} />
 
       {/* --- MODAL 1: CREATE CHIT GROUP --- */}
       <Modal visible={showCreateModal} transparent animationType="fade" onRequestClose={() => setShowCreateModal(false)}>
