@@ -1,6 +1,12 @@
 import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { addMoney, parsePositiveAmount, toPaise, fromPaise, subtractMoney } from '../../lib/money.js';
+import { sendError, notFound } from '../../lib/http.js';
+import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
+import { assertSameCompany, companyScope, requireWriteCompanyId } from '../../security/tenant.js';
+
+const ACCOUNT_TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'INCOME', 'EXPENSE'];
 
 /**
  * Standard Chart of Accounts template for Chit Fund Company
@@ -63,7 +69,7 @@ async function ensureStandardAccounts(companyId: string) {
  */
 export const listAccounts = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || (req.query.companyId as string);
+    const companyId = companyScope(req);
     if (!companyId) {
       return res.status(400).json({ success: false, message: 'Company ID required' });
     }
@@ -89,20 +95,20 @@ export const listAccounts = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, data: accounts });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const createAccount = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || req.body.companyId;
-    const { code, name, type, openingBalance = 0 } = req.body;
+    const companyId = await requireWriteCompanyId(req);
+    const { code, name, type, openingBalance = 0 } = req.body || {};
 
-    if (!companyId || !code || !name || !type) {
+    if (!companyId || !code || !name || !type || typeof code !== 'string' || typeof name !== 'string') {
       return res.status(400).json({ success: false, message: 'companyId, code, name, and type are required' });
     }
 
-    if (!['ASSET', 'LIABILITY', 'EQUITY', 'INCOME', 'EXPENSE'].includes(type)) {
+    if (!ACCOUNT_TYPES.includes(type)) {
       return res.status(400).json({ success: false, message: 'Invalid account type' });
     }
 
@@ -119,8 +125,8 @@ export const createAccount = async (req: AuthRequest, res: Response) => {
         code: code.trim(),
         name: name.trim(),
         type,
-        openingBalance: Number(openingBalance) || 0,
-        currentBalance: Number(openingBalance) || 0,
+        openingBalance: parsePositiveAmount(openingBalance, { allowZero: true }) ?? 0,
+        currentBalance: parsePositiveAmount(openingBalance, { allowZero: true }) ?? 0,
         isActive: true,
       },
     });
@@ -141,7 +147,7 @@ export const createAccount = async (req: AuthRequest, res: Response) => {
 
     return res.status(201).json({ success: true, message: 'Account created successfully', data: account });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -150,7 +156,7 @@ export const createAccount = async (req: AuthRequest, res: Response) => {
  */
 export const getCashbook = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || (req.query.companyId as string);
+    const companyId = companyScope(req);
     const { period, startDate, endDate } = req.query; // period: 'DAILY' | 'WEEKLY' | '15DAYS' | 'MONTH' | 'CUSTOM'
 
     if (!companyId) {
@@ -278,14 +284,14 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
     const cashReceipts = allReceipts.filter((t) => t.paymentMode === 'CASH');
     const digitalReceipts = allReceipts.filter((t) => t.paymentMode !== 'CASH');
 
-    const totalCashReceipts = cashReceipts.reduce((sum, t) => sum + t.amount, 0);
-    const totalDigitalReceipts = digitalReceipts.reduce((sum, t) => sum + t.amount, 0);
-    const totalCashIn = allReceipts.reduce((sum, t) => sum + t.amount, 0);
+    const totalCashReceipts = cashReceipts.reduce((sum, t) => addMoney(sum, t.amount), 0);
+    const totalDigitalReceipts = digitalReceipts.reduce((sum, t) => addMoney(sum, t.amount), 0);
+    const totalCashIn = allReceipts.reduce((sum, t) => addMoney(sum, t.amount), 0);
 
     // Breakdown of Cash Out
-    const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
-    const totalPayouts = payouts.reduce((sum, p) => sum + p.netPayoutAmount, 0);
-    const totalRefunds = refunds.reduce((sum, r) => sum + r.amount, 0);
+    const totalExpenses = expenses.reduce((sum, e) => addMoney(sum, e.amount), 0);
+    const totalPayouts = payouts.reduce((sum, p) => addMoney(sum, p.netPayoutAmount), 0);
+    const totalRefunds = refunds.reduce((sum, r) => addMoney(sum, r.amount), 0);
     const totalCashOut = totalExpenses + totalPayouts + totalRefunds;
 
     const openingBalance = 50000; // Base opening balance
@@ -316,8 +322,8 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
       if (!dailyMap[key]) {
         dailyMap[key] = { date: key, cashIn: 0, cashOut: 0, netFlow: 0, receiptsCount: 0, expensesCount: 0, payoutsCount: 0 };
       }
-      dailyMap[key].cashIn += r.amount;
-      dailyMap[key].netFlow += r.amount;
+      dailyMap[key].cashIn = addMoney(dailyMap[key].cashIn, r.amount);
+      dailyMap[key].netFlow = addMoney(dailyMap[key].netFlow, r.amount);
       dailyMap[key].receiptsCount += 1;
     });
 
@@ -326,8 +332,8 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
       if (!dailyMap[key]) {
         dailyMap[key] = { date: key, cashIn: 0, cashOut: 0, netFlow: 0, receiptsCount: 0, expensesCount: 0, payoutsCount: 0 };
       }
-      dailyMap[key].cashOut += e.amount;
-      dailyMap[key].netFlow -= e.amount;
+      dailyMap[key].cashOut = addMoney(dailyMap[key].cashOut, e.amount);
+      dailyMap[key].netFlow = subtractMoney(dailyMap[key].netFlow, e.amount);
       dailyMap[key].expensesCount += 1;
     });
 
@@ -336,8 +342,8 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
       if (!dailyMap[key]) {
         dailyMap[key] = { date: key, cashIn: 0, cashOut: 0, netFlow: 0, receiptsCount: 0, expensesCount: 0, payoutsCount: 0 };
       }
-      dailyMap[key].cashOut += p.netPayoutAmount;
-      dailyMap[key].netFlow -= p.netPayoutAmount;
+      dailyMap[key].cashOut = addMoney(dailyMap[key].cashOut, p.netPayoutAmount);
+      dailyMap[key].netFlow = subtractMoney(dailyMap[key].netFlow, p.netPayoutAmount);
       dailyMap[key].payoutsCount += 1;
     });
 
@@ -346,8 +352,8 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
       if (!dailyMap[key]) {
         dailyMap[key] = { date: key, cashIn: 0, cashOut: 0, netFlow: 0, receiptsCount: 0, expensesCount: 0, payoutsCount: 0 };
       }
-      dailyMap[key].cashOut += ref.amount;
-      dailyMap[key].netFlow -= ref.amount;
+      dailyMap[key].cashOut = addMoney(dailyMap[key].cashOut, ref.amount);
+      dailyMap[key].netFlow = subtractMoney(dailyMap[key].netFlow, ref.amount);
     });
 
     const dailyBreakdown = Object.values(dailyMap).sort((a, b) => b.date.localeCompare(a.date));
@@ -381,7 +387,7 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -390,7 +396,7 @@ export const getCashbook = async (req: AuthRequest, res: Response) => {
  */
 export const getBankbook = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || (req.query.companyId as string);
+    const companyId = companyScope(req);
 
     if (!companyId) {
       return res.status(400).json({ success: false, message: 'Company ID required' });
@@ -406,6 +412,7 @@ export const getBankbook = async (req: AuthRequest, res: Response) => {
     const bankPayoutsWhere: any = {
       status: 'DISBURSED',
       paymentMode: { in: ['BANK_TRANSFER', 'CHEQUE'] },
+      auction: { group: { companyId } },
     };
 
     const [bankCollections, bankDisbursements] = await Promise.all([
@@ -423,8 +430,8 @@ export const getBankbook = async (req: AuthRequest, res: Response) => {
       }),
     ]);
 
-    const totalDeposits = bankCollections.reduce((sum, t) => sum + t.amount, 0);
-    const totalWithdrawals = bankDisbursements.reduce((sum, p) => sum + p.netPayoutAmount, 0);
+    const totalDeposits = bankCollections.reduce((sum, t) => addMoney(sum, t.amount), 0);
+    const totalWithdrawals = bankDisbursements.reduce((sum, p) => addMoney(sum, p.netPayoutAmount), 0);
     const openingBalance = 250000;
     const closingBalance = openingBalance + totalDeposits - totalWithdrawals;
 
@@ -444,7 +451,7 @@ export const getBankbook = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -453,7 +460,7 @@ export const getBankbook = async (req: AuthRequest, res: Response) => {
  */
 export const listJournalEntries = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || (req.query.companyId as string);
+    const companyId = companyScope(req);
     if (!companyId) return res.status(400).json({ success: false, message: 'Company ID required' });
 
     const entries = await prisma.journalEntry.findMany({
@@ -469,40 +476,69 @@ export const listJournalEntries = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, data: entries });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const createJournalEntry = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || req.body.companyId;
-    const { date, narration, lines, voucherNo } = req.body;
+    const companyId = await requireWriteCompanyId(req);
+    const { date, narration, lines, voucherNo } = req.body || {};
 
-    if (!companyId || !narration || !Array.isArray(lines) || lines.length < 2) {
+    if (!companyId || !narration || typeof narration !== 'string' || !Array.isArray(lines) || lines.length < 2 || lines.length > 100) {
       return res.status(400).json({
         success: false,
         message: 'Valid narration and at least 2 debit/credit lines are required for double-entry bookkeeping.',
       });
     }
 
-    const totalDebits = lines
-      .filter((l: any) => l.type === 'DEBIT')
-      .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
-    const totalCredits = lines
-      .filter((l: any) => l.type === 'CREDIT')
-      .reduce((sum: number, l: any) => sum + (Number(l.amount) || 0), 0);
+    for (const l of lines) {
+      if (!l || !['DEBIT', 'CREDIT'].includes(l.type) || typeof l.accountId !== 'string' || parsePositiveAmount(l.amount) === null) {
+        return res.status(400).json({
+          success: false,
+          message: 'Each journal line needs an accountId, a type of DEBIT or CREDIT and a positive amount.',
+        });
+      }
+    }
 
-    if (Math.abs(totalDebits - totalCredits) > 0.01) {
+    // Every account must belong to this company (prevents posting into another company's ledger).
+    const accountIds = [...new Set(lines.map((l: any) => l.accountId as string))];
+    const ownedAccounts = await prisma.account.count({ where: { id: { in: accountIds }, companyId } });
+    if (ownedAccounts !== accountIds.length) {
+      return res.status(404).json({ success: false, message: 'One or more accounts were not found' });
+    }
+
+    const debitPaise = lines.filter((l: any) => l.type === 'DEBIT').reduce((s: number, l: any) => s + toPaise(l.amount), 0);
+    const creditPaise = lines.filter((l: any) => l.type === 'CREDIT').reduce((s: number, l: any) => s + toPaise(l.amount), 0);
+    const totalDebits = fromPaise(debitPaise);
+    const totalCredits = fromPaise(creditPaise);
+
+    if (debitPaise !== creditPaise) {
       return res.status(400).json({
         success: false,
         message: `Unbalanced entry: Total Debits (₹${totalDebits.toFixed(2)}) must exactly equal Total Credits (₹${totalCredits.toFixed(2)}).`,
       });
     }
 
-    const entryNo = voucherNo || `JV-${Date.now().toString().slice(-6)}`;
-    const entryDate = date || new Date().toISOString().split('T')[0];
+    const entryDate = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : new Date().toISOString().split('T')[0];
 
     const result = await prisma.$transaction(async (tx) => {
+      // Journal numbers are allocated atomically per company (previously the last 6 digits of a timestamp).
+      let entryNo: string;
+      if (typeof voucherNo === 'string' && voucherNo.trim()) {
+        entryNo = voucherNo.trim().slice(0, 50);
+      } else {
+        const seq = await nextSequence(
+          companyId,
+          'journalEntry',
+          async () => {
+            const existing = await tx.journalEntry.findMany({ where: { companyId, entryNo: { startsWith: 'JV-' } }, select: { entryNo: true } });
+            return maxNumericSuffix(existing.map((e) => e.entryNo), 'JV-');
+          },
+          tx
+        );
+        entryNo = `JV-${String(seq).padStart(6, '0')}`;
+      }
       const entry = await tx.journalEntry.create({
         data: {
           companyId,
@@ -515,8 +551,8 @@ export const createJournalEntry = async (req: AuthRequest, res: Response) => {
             create: lines.map((l: any) => ({
               accountId: l.accountId,
               type: l.type,
-              amount: Number(l.amount),
-              description: l.description || null,
+              amount: parsePositiveAmount(l.amount)!,
+              description: l.description ? String(l.description).slice(0, 500) : null,
             })),
           },
         },
@@ -528,7 +564,7 @@ export const createJournalEntry = async (req: AuthRequest, res: Response) => {
         const factor = l.type === 'DEBIT' ? 1 : -1;
         await tx.account.update({
           where: { id: l.accountId },
-          data: { currentBalance: { increment: Number(l.amount) * factor } },
+          data: { currentBalance: { increment: fromPaise(toPaise(l.amount) * factor) } },
         });
       }
 
@@ -543,7 +579,7 @@ export const createJournalEntry = async (req: AuthRequest, res: Response) => {
           action: 'JOURNAL_ENTRY_POSTED',
           entity: 'JournalEntry',
           entityId: result.id,
-          details: JSON.stringify({ entryNo, narration, totalAmount: totalDebits }),
+          details: JSON.stringify({ entryNo: result.entryNo, narration, totalAmount: totalDebits }),
           ipAddress: req.ip || 'unknown',
         },
       });
@@ -551,11 +587,11 @@ export const createJournalEntry = async (req: AuthRequest, res: Response) => {
 
     return res.status(201).json({
       success: true,
-      message: `Journal Entry ${entryNo} posted successfully.`,
+      message: `Journal Entry ${result.entryNo} posted successfully.`,
       data: result,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -564,7 +600,7 @@ export const createJournalEntry = async (req: AuthRequest, res: Response) => {
  */
 export const listExpenses = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId;
+    const companyId = companyScope(req);
     const { category, search } = req.query;
     const where: any = companyId ? { companyId } : {};
     if (category && typeof category === 'string' && category !== 'ALL') where.category = category;
@@ -580,7 +616,7 @@ export const listExpenses = async (req: AuthRequest, res: Response) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    const totalAmount = expenses.reduce((sum, e) => sum + e.amount, 0);
+    const totalAmount = expenses.reduce((sum, e) => addMoney(sum, e.amount), 0);
 
     return res.json({
       success: true,
@@ -590,26 +626,30 @@ export const listExpenses = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const createExpense = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || req.body.companyId;
-    const { category, amount, description, expenseDate } = req.body;
+    const companyId = await requireWriteCompanyId(req);
+    const { category, amount, description, expenseDate } = req.body || {};
 
-    if (!companyId || !category || !amount || !description) {
+    if (!companyId || !category || !amount || !description || typeof description !== 'string' || typeof category !== 'string') {
       return res.status(400).json({ success: false, message: 'category, amount, and description are required' });
+    }
+    const cleanAmount = parsePositiveAmount(amount);
+    if (cleanAmount === null) {
+      return res.status(400).json({ success: false, message: 'Amount must be a positive number' });
     }
 
     const expense = await prisma.expense.create({
       data: {
         companyId,
-        category,
-        amount: Number(amount),
-        description: description.trim(),
-        expenseDate: expenseDate || new Date().toISOString().split('T')[0],
+        category: category.slice(0, 50),
+        amount: cleanAmount,
+        description: description.trim().slice(0, 1000),
+        expenseDate: typeof expenseDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(expenseDate) ? expenseDate : new Date().toISOString().split('T')[0],
         recordedBy: req.user?.fullName || req.user?.phone || 'Accountant',
       },
     });
@@ -617,7 +657,7 @@ export const createExpense = async (req: AuthRequest, res: Response) => {
     try {
       await prisma.auditLog.create({
         data: {
-          companyId: req.user?.companyId || null,
+          companyId,
           userId: req.user?.id || null,
           action: 'EXPENSE_RECORDED',
           entity: 'Expense',
@@ -630,7 +670,7 @@ export const createExpense = async (req: AuthRequest, res: Response) => {
 
     return res.status(201).json({ success: true, message: 'Expense recorded successfully', data: expense });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -640,7 +680,7 @@ export const createExpense = async (req: AuthRequest, res: Response) => {
  */
 export const getGeneralLedger = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || (req.query.companyId as string);
+    const companyId = companyScope(req);
     const { accountId } = req.params;
 
     if (!companyId || !accountId) {
@@ -651,6 +691,8 @@ export const getGeneralLedger = async (req: AuthRequest, res: Response) => {
       where: { id: accountId },
     });
     if (!account) return res.status(404).json({ success: false, message: 'Account not found' });
+    assertSameCompany(req, account.companyId, 'Account');
+    if (account.companyId !== companyId) throw notFound('Account not found');
 
     const lines = await prisma.journalEntryLine.findMany({
       where: { accountId },
@@ -664,7 +706,7 @@ export const getGeneralLedger = async (req: AuthRequest, res: Response) => {
     const ledgerEntries = lines.map((line) => {
       const debit = line.type === 'DEBIT' ? line.amount : 0;
       const credit = line.type === 'CREDIT' ? line.amount : 0;
-      runningBalance += debit - credit;
+      runningBalance = fromPaise(toPaise(runningBalance) + toPaise(debit) - toPaise(credit));
       return {
         id: line.id,
         date: line.journalEntry.date,
@@ -690,7 +732,7 @@ export const getGeneralLedger = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -699,7 +741,7 @@ export const getGeneralLedger = async (req: AuthRequest, res: Response) => {
  */
 export const getTrialBalance = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || (req.query.companyId as string);
+    const companyId = companyScope(req);
     if (!companyId) return res.status(400).json({ success: false, message: 'Company ID required' });
 
     await ensureStandardAccounts(companyId);
@@ -716,8 +758,8 @@ export const getTrialBalance = async (req: AuthRequest, res: Response) => {
     let totalCredits = 0;
 
     const rows = accounts.map((acc) => {
-      const lineDebits = acc.lines.filter((l) => l.type === 'DEBIT').reduce((s, l) => s + l.amount, 0);
-      const lineCredits = acc.lines.filter((l) => l.type === 'CREDIT').reduce((s, l) => s + l.amount, 0);
+      const lineDebits = acc.lines.filter((l) => l.type === 'DEBIT').reduce((s, l) => addMoney(s, l.amount), 0);
+      const lineCredits = acc.lines.filter((l) => l.type === 'CREDIT').reduce((s, l) => addMoney(s, l.amount), 0);
       const net = acc.openingBalance + lineDebits - lineCredits;
 
       let debitBalance = 0;
@@ -731,8 +773,8 @@ export const getTrialBalance = async (req: AuthRequest, res: Response) => {
         else debitBalance = net;
       }
 
-      totalDebits += debitBalance;
-      totalCredits += creditBalance;
+      totalDebits = addMoney(totalDebits, debitBalance);
+      totalCredits = addMoney(totalCredits, creditBalance);
 
       return {
         id: acc.id,
@@ -757,7 +799,7 @@ export const getTrialBalance = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -766,7 +808,7 @@ export const getTrialBalance = async (req: AuthRequest, res: Response) => {
  */
 export const getFinancialStatements = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || (req.query.companyId as string);
+    const companyId = companyScope(req);
     if (!companyId) return res.status(400).json({ success: false, message: 'Company ID required' });
 
     await ensureStandardAccounts(companyId);
@@ -785,8 +827,8 @@ export const getFinancialStatements = async (req: AuthRequest, res: Response) =>
     ]);
 
     // Calculate foreman commissions earned
-    const foremanCommissionIncome = completedAuctions.reduce((s, a) => s + a.foremanCommission, 0);
-    const operationalExpenses = totalExpenses._sum.amount || 0;
+    const foremanCommissionIncome = completedAuctions.reduce((s, a) => addMoney(s, a.foremanCommission), 0);
+    const operationalExpenses = Number(totalExpenses._sum.amount || 0);
     const defaultLateFees = 12500; // Sample late interest earned
     const totalIncome = foremanCommissionIncome + defaultLateFees;
     const netProfit = totalIncome - operationalExpenses;
@@ -835,7 +877,7 @@ export const getFinancialStatements = async (req: AuthRequest, res: Response) =>
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -844,8 +886,8 @@ export const getFinancialStatements = async (req: AuthRequest, res: Response) =>
  */
 export const closeFinancialPeriod = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId || req.body.companyId;
-    const { periodYear, notes } = req.body;
+    const companyId = await requireWriteCompanyId(req);
+    const { periodYear, notes } = req.body || {};
 
     if (!companyId) return res.status(400).json({ success: false, message: 'Company ID required' });
 
@@ -874,7 +916,7 @@ export const closeFinancialPeriod = async (req: AuthRequest, res: Response) => {
       message: `Financial year ${closingYear} successfully closed and reconciled. Ledgers locked for audit verification.`,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -892,11 +934,7 @@ export const closeFinancialPeriod = async (req: AuthRequest, res: Response) => {
  */
 export const getComprehensiveReports = async (req: AuthRequest, res: Response) => {
   try {
-    let companyId = req.user?.companyId || (req.query.companyId as string);
-    if (!companyId) {
-      const firstCo = await prisma.company.findFirst();
-      companyId = firstCo?.id!;
-    }
+    const companyId = companyScope(req);
     if (!companyId) {
       return res.status(400).json({ success: false, message: 'Company ID required' });
     }
@@ -928,9 +966,9 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
       take: 200,
     });
 
-    const totalCollected = collections.reduce((sum, t) => sum + t.amount, 0);
-    const cashCollected = collections.filter((t) => t.paymentMode === 'CASH').reduce((sum, t) => sum + t.amount, 0);
-    const digitalCollected = collections.filter((t) => t.paymentMode !== 'CASH').reduce((sum, t) => sum + t.amount, 0);
+    const totalCollected = collections.reduce((sum, t) => addMoney(sum, t.amount), 0);
+    const cashCollected = collections.filter((t) => t.paymentMode === 'CASH').reduce((sum, t) => addMoney(sum, t.amount), 0);
+    const digitalCollected = collections.filter((t) => t.paymentMode !== 'CASH').reduce((sum, t) => addMoney(sum, t.amount), 0);
 
     // Collector-wise breakdown
     const collectorMap: Record<string, { staffName: string; total: number; count: number; cash: number; digital: number }> = {};
@@ -940,9 +978,9 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
         collectorMap[staffName] = { staffName, total: 0, count: 0, cash: 0, digital: 0 };
       }
       collectorMap[staffName].count += 1;
-      collectorMap[staffName].total += t.amount;
-      if (t.paymentMode === 'CASH') collectorMap[staffName].cash += t.amount;
-      else collectorMap[staffName].digital += t.amount;
+      collectorMap[staffName].total = addMoney(collectorMap[staffName].total, t.amount);
+      if (t.paymentMode === 'CASH') collectorMap[staffName].cash = addMoney(collectorMap[staffName].cash, t.amount);
+      else collectorMap[staffName].digital = addMoney(collectorMap[staffName].digital, t.amount);
     });
 
     // 2. Chit Groups & Auctions Summary
@@ -966,9 +1004,9 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
       take: 50,
     });
 
-    const totalForemanCommission = auctions.reduce((sum, a) => sum + (a.foremanCommission || 0), 0);
-    const totalDividendDistributed = auctions.reduce((sum, a) => sum + (a.totalDividend || 0), 0);
-    const totalWinningBidDiscounts = auctions.reduce((sum, a) => sum + (a.winningBidDiscount || 0), 0);
+    const totalForemanCommission = auctions.reduce((sum, a) => addMoney(sum, a.foremanCommission || 0), 0);
+    const totalDividendDistributed = auctions.reduce((sum, a) => addMoney(sum, a.totalDividend || 0), 0);
+    const totalWinningBidDiscounts = auctions.reduce((sum, a) => addMoney(sum, a.winningBidDiscount || 0), 0);
 
     // 3. Subscribers & Arrears
     const subscribers = await prisma.subscriber.findMany({
@@ -982,7 +1020,7 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
     });
 
     const subscribersWithTotals = subscribers.map((s) => {
-      const contributed = s.transactions.reduce((sum, t) => sum + t.amount, 0);
+      const contributed = s.transactions.reduce((sum, t) => addMoney(sum, t.amount), 0);
       return {
         id: s.id,
         fullName: s.fullName,
@@ -991,7 +1029,7 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
       };
     });
 
-    const totalContributed = subscribersWithTotals.reduce((sum, s) => sum + s.totalContributed, 0);
+    const totalContributed = subscribersWithTotals.reduce((sum, s) => addMoney(sum, s.totalContributed), 0);
     const totalArrears = 0;
     const computedLateFees = 0;
 
@@ -1001,7 +1039,7 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
-    const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
+    const totalExpenses = expenses.reduce((sum, e) => addMoney(sum, e.amount), 0);
 
     const expenseCategoryMap: Record<string, number> = {};
     expenses.forEach((e) => {
@@ -1016,11 +1054,11 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
 
     const totalDebits = accounts
       .filter((a) => a.type === 'ASSET' || a.type === 'EXPENSE')
-      .reduce((sum, a) => sum + Math.abs(a.currentBalance), 0);
+      .reduce((sum, a) => addMoney(sum, Math.abs(a.currentBalance)), 0);
 
     const totalCredits = accounts
       .filter((a) => a.type === 'LIABILITY' || a.type === 'EQUITY' || a.type === 'INCOME')
-      .reduce((sum, a) => sum + Math.abs(a.currentBalance), 0);
+      .reduce((sum, a) => addMoney(sum, Math.abs(a.currentBalance)), 0);
 
     return res.json({
       success: true,
@@ -1083,6 +1121,6 @@ export const getComprehensiveReports = async (req: AuthRequest, res: Response) =
     });
   } catch (err: any) {
     console.error('Error generating comprehensive reports:', err);
-    return res.status(500).json({ success: false, message: err.message || 'Failed to generate reports' });
+    return sendError(res, err);
   }
 };

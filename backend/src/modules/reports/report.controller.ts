@@ -1,15 +1,14 @@
 import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { sendError } from '../../lib/http.js';
+import { sumMoney } from '../../lib/money.js';
+import { companyScope } from '../../security/tenant.js';
 
 export const getDashboardStats = async (req: AuthRequest, res: Response) => {
   try {
     const role = req.user?.role;
-    let companyId = req.user?.companyId;
-    if (!companyId) {
-      const firstCo = await prisma.company.findFirst();
-      companyId = firstCo?.id!;
-    }
+    const companyId = role === 'SUPER_ADMIN' ? undefined : companyScope(req);
 
     if (role === 'SUPER_ADMIN') {
       const [activeCompanies, totalUsers, activeUsers, totalSubscribers, activeGroups] = await Promise.all([
@@ -67,9 +66,9 @@ export const getDashboardStats = async (req: AuthRequest, res: Response) => {
         }),
       ]);
 
-      const todayTotalCollected = todayTransactions.reduce((acc, t) => acc + t.amount, 0);
-      const todayCashCollected = todayTransactions.filter(t => t.paymentMode === 'CASH').reduce((acc, t) => acc + t.amount, 0);
-      const todayBankUpiCollected = todayTransactions.filter(t => t.paymentMode !== 'CASH').reduce((acc, t) => acc + t.amount, 0);
+      const todayTotalCollected = sumMoney(todayTransactions.map((t) => t.amount));
+      const todayCashCollected = sumMoney(todayTransactions.filter((t) => t.paymentMode === 'CASH').map((t) => t.amount));
+      const todayBankUpiCollected = sumMoney(todayTransactions.filter((t) => t.paymentMode !== 'CASH').map((t) => t.amount));
 
       return res.json({
         success: true,
@@ -89,7 +88,7 @@ export const getDashboardStats = async (req: AuthRequest, res: Response) => {
     }
 
     // COLLECTION_STAFF role
-    const staffId = req.user?.id!;
+    const staffId = req.user!.id;
     const [assignedSubscribers, todayTransactions] = await Promise.all([
       prisma.subscriber.count({
         where: { ...whereCompany, assignedStaffId: staffId, status: 'ACTIVE' },
@@ -110,9 +109,9 @@ export const getDashboardStats = async (req: AuthRequest, res: Response) => {
     const approvedTransactions = todayTransactions.filter((t) => t.verificationStatus === 'VERIFIED');
     const pendingTransactions = todayTransactions.filter((t) => t.verificationStatus === 'PENDING_VERIFICATION');
 
-    const todayAmountCollected = approvedTransactions.reduce((acc, t) => acc + t.amount, 0);
-    const cashInHand = approvedTransactions.filter((t) => t.paymentMode === 'CASH').reduce((acc, t) => acc + t.amount, 0);
-    const pendingApprovalAmount = pendingTransactions.reduce((acc, t) => acc + t.amount, 0);
+    const todayAmountCollected = sumMoney(approvedTransactions.map((t) => t.amount));
+    const cashInHand = sumMoney(approvedTransactions.filter((t) => t.paymentMode === 'CASH').map((t) => t.amount));
+    const pendingApprovalAmount = sumMoney(pendingTransactions.map((t) => t.amount));
 
     return res.json({
       success: true,
@@ -127,6 +126,6 @@ export const getDashboardStats = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };

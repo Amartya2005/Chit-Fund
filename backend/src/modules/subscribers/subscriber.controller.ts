@@ -1,14 +1,21 @@
 import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { sendError, notFound } from '../../lib/http.js';
+import { roundMoney, sumMoney, subtractMoney } from '../../lib/money.js';
+import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
+import {
+  assertUsersInCompany,
+  companyWhere,
+  loadGroupForTenant,
+  loadSubscriberForTenant,
+  requireWriteCompanyId,
+  staffGroupIds as loadStaffGroupIds,
+} from '../../security/tenant.js';
 
 export const listSubscribers = async (req: AuthRequest, res: Response) => {
   try {
-    let companyId = req.user?.companyId;
-    if (!companyId) {
-      const firstCo = await prisma.company.findFirst();
-      companyId = firstCo?.id;
-    }
+    const { companyId } = companyWhere(req);
     const { search, kycStatus, staffId } = req.query;
 
     const where: any = {};
@@ -75,21 +82,13 @@ export const listSubscribers = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, count: subscribers.length, data: subscribers });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const createSubscriber = async (req: AuthRequest, res: Response) => {
   try {
-    let companyId = req.user?.companyId;
-    if (!companyId) {
-      const defaultComp = await prisma.company.findFirst();
-      companyId = defaultComp?.id;
-    }
-
-    if (!companyId) {
-      return res.status(400).json({ success: false, message: 'Valid company reference required' });
-    }
+    const companyId = await requireWriteCompanyId(req);
 
     const {
       assignedStaffId,
@@ -120,6 +119,15 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
     if (!cleanName || !cleanPhone) {
       return res.status(400).json({ success: false, message: 'Full name and phone number are required' });
     }
+    if (cleanName.length > 200 || cleanPhone.length > 20) {
+      return res.status(400).json({ success: false, message: 'Full name or phone number is too long' });
+    }
+    if (assignedStaffId) await assertUsersInCompany([assignedStaffId], companyId);
+    if (userId) {
+      // A linked login must be a user of the same company.
+      const linked = await prisma.user.findFirst({ where: { id: String(userId), companyId }, select: { id: true } });
+      if (!linked) throw notFound('Linked user not found');
+    }
 
     // Staff can ONLY add new members for their assigned chit group
     if (req.user?.role === 'COLLECTION_STAFF' && !groupId) {
@@ -131,13 +139,12 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
 
     // If a group assignment was specified, validate assignment permissions
     if (groupId) {
-      const targetGroup = await prisma.chitGroup.findUnique({
-        where: { id: groupId },
+      const scopedGroup = await loadGroupForTenant(req, groupId);
+      if (scopedGroup.companyId !== companyId) throw notFound('Chit group not found');
+      const targetGroup = await prisma.chitGroup.findUniqueOrThrow({
+        where: { id: scopedGroup.id },
         include: { members: true, staffAssignments: true },
       });
-      if (!targetGroup) {
-        return res.status(404).json({ success: false, message: 'Specified chit group not found' });
-      }
 
       // Staff can ONLY add and assign member to their own assigned chit group
       if (req.user?.role === 'COLLECTION_STAFF') {
@@ -163,7 +170,7 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
 
     // Check if phone number already registered as a subscriber
     const existing = await prisma.subscriber.findFirst({
-      where: { phone: cleanPhone },
+      where: { phone: cleanPhone, companyId },
     });
 
     if (existing) {
@@ -207,7 +214,7 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
           });
         }
 
-        const ticketNumber = targetGroup.members.length + 1;
+        const ticketNumber = targetGroup.members.reduce((max, m) => Math.max(max, m.ticketNumber), 0) + 1;
         await prisma.chitGroupMember.create({
           data: {
             groupId,
@@ -258,9 +265,12 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
       assignedStaffId ||
       (req.user?.role === 'COLLECTION_STAFF' ? req.user.id : null);
 
-    // Generate Subscriber Code e.g. SUB-1004
-    const count = await prisma.subscriber.count({ where: { companyId } });
-    const subscriberCode = `SUB-${1000 + count + 1}`;
+    // Generate Subscriber Code e.g. SUB-1004 (atomic per-company sequence; previously count()+1)
+    const codeSeq = await nextSequence(companyId, 'subscriberCode', async () => {
+      const codes = await prisma.subscriber.findMany({ where: { companyId }, select: { subscriberCode: true } });
+      return Math.max(1000, maxNumericSuffix(codes.map((c) => c.subscriberCode), 'SUB-'));
+    });
+    const subscriberCode = `SUB-${codeSeq}`;
 
     const isStaff = req.user?.role === 'COLLECTION_STAFF';
 
@@ -314,7 +324,7 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
 
     // If Manager created and groupId specified, assign immediately
     if (!isStaff && groupId && targetGroup) {
-      const ticketNumber = targetGroup.members.length + 1;
+      const ticketNumber = targetGroup.members.reduce((max: number, m: any) => Math.max(max, m.ticketNumber), 0) + 1;
       await prisma.chitGroupMember.create({
         data: {
           groupId,
@@ -374,13 +384,14 @@ export const createSubscriber = async (req: AuthRequest, res: Response) => {
 
     return res.status(201).json({ success: true, data: freshSubscriber });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const getSubscriberById = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    await loadSubscriberForTenant(req, id);
     const subscriber = await prisma.subscriber.findUnique({
       where: { id },
       include: {
@@ -409,17 +420,7 @@ export const getSubscriberById = async (req: AuthRequest, res: Response) => {
 
     // Role check: Staff can only access members of their own assigned chit groups
     if (req.user?.role === 'COLLECTION_STAFF') {
-      const staffUserId = req.user.id;
-      const staffGroups = await prisma.chitGroup.findMany({
-        where: {
-          OR: [
-            { assignedStaffId: staffUserId },
-            { staffAssignments: { some: { staffId: staffUserId } } },
-          ],
-        },
-        select: { id: true },
-      });
-      const staffGroupIds = staffGroups.map((g) => g.id);
+      const staffGroupIds = await loadStaffGroupIds(req);
       const isMember = subscriber.memberships.some((m) => staffGroupIds.includes(m.groupId));
       if (!isMember) {
         return res.status(403).json({
@@ -431,7 +432,7 @@ export const getSubscriberById = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, data: subscriber });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -447,13 +448,11 @@ export const verifyKyc = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: 'Valid kycStatus (VERIFIED, REJECTED, PENDING) is required' });
     }
 
-    const existingSubscriber = await prisma.subscriber.findUnique({
+    await loadSubscriberForTenant(req, id);
+    const existingSubscriber = await prisma.subscriber.findUniqueOrThrow({
       where: { id },
       include: { memberships: true },
     });
-    if (!existingSubscriber) {
-      return res.status(404).json({ success: false, message: 'Subscriber not found' });
-    }
 
     let targetGroupId = assignGroupId;
     if (!targetGroupId && existingSubscriber.kycNotes) {
@@ -472,13 +471,13 @@ export const verifyKyc = async (req: AuthRequest, res: Response) => {
     if (kycStatus === 'VERIFIED' && targetGroupId) {
       const alreadyInGroup = existingSubscriber.memberships.some((m) => m.groupId === targetGroupId);
       if (!alreadyInGroup) {
-        const targetGroup = await prisma.chitGroup.findUnique({
-          where: { id: targetGroupId },
+        const targetGroup = await prisma.chitGroup.findFirst({
+          where: { id: String(targetGroupId), companyId: existingSubscriber.companyId },
           include: { members: true },
         });
 
         if (targetGroup && targetGroup.members.length < targetGroup.maxMembers) {
-          const ticketNumber = targetGroup.members.length + 1;
+          const ticketNumber = targetGroup.members.reduce((max, m) => Math.max(max, m.ticketNumber), 0) + 1;
           await prisma.chitGroupMember.create({
             data: {
               groupId: targetGroupId,
@@ -549,7 +548,7 @@ export const verifyKyc = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, message: `Member KYC marked ${kycStatus}${enrolledMessage}.`, data: subscriber });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -559,6 +558,7 @@ export const verifyKyc = async (req: AuthRequest, res: Response) => {
 export const getMemberLedger = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    await loadSubscriberForTenant(req, id);
     const subscriber = await prisma.subscriber.findUnique({
       where: { id },
       include: {
@@ -580,17 +580,7 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
 
     // Role check: Staff can only access ledger for members of their own assigned chit groups
     if (req.user?.role === 'COLLECTION_STAFF') {
-      const staffUserId = req.user.id;
-      const staffGroups = await prisma.chitGroup.findMany({
-        where: {
-          OR: [
-            { assignedStaffId: staffUserId },
-            { staffAssignments: { some: { staffId: staffUserId } } },
-          ],
-        },
-        select: { id: true },
-      });
-      const staffGroupIds = staffGroups.map((g) => g.id);
+      const staffGroupIds = await loadStaffGroupIds(req);
       const isMember = subscriber.memberships.some((m) => staffGroupIds.includes(m.groupId));
       if (!isMember) {
         return res.status(403).json({
@@ -609,14 +599,14 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
       const groupTxns = subscriber.transactions.filter(
         (t) => t.groupId === m.groupId && t.verificationStatus === 'VERIFIED' && !t.isReversed
       );
-      const paidInGroup = groupTxns.reduce((sum, t) => sum + t.amount, 0);
+      const paidInGroup = sumMoney(groupTxns.map((t) => t.amount));
 
       const schedules = m.group.schedules.map((sch) => {
-        totalScheduled += sch.scheduledAmount;
-        totalDividends += sch.dividendAmount;
+        totalScheduled = sumMoney([totalScheduled, sch.scheduledAmount]);
+        totalDividends = sumMoney([totalDividends, sch.dividendAmount]);
         const matchingTxns = groupTxns.filter((t) => t.installmentNo === sch.installmentNo);
-        const installmentPaid = matchingTxns.reduce((s, t) => s + t.amount, 0);
-        const outstanding = Math.max(0, sch.netDueAmount - installmentPaid);
+        const installmentPaid = sumMoney(matchingTxns.map((t) => t.amount));
+        const outstanding = Math.max(0, subtractMoney(sch.netDueAmount, installmentPaid));
 
         return {
           installmentNo: sch.installmentNo,
@@ -630,7 +620,7 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
         };
       });
 
-      totalPaid += paidInGroup;
+      totalPaid = sumMoney([totalPaid, paidInGroup]);
 
       return {
         groupCode: m.group.groupCode,
@@ -643,8 +633,8 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
       };
     });
 
-    const netScheduledDue = totalScheduled - totalDividends;
-    const totalArrears = Math.max(0, netScheduledDue - totalPaid);
+    const netScheduledDue = subtractMoney(totalScheduled, totalDividends);
+    const totalArrears = Math.max(0, subtractMoney(netScheduledDue, totalPaid));
 
     return res.json({
       success: true,
@@ -668,7 +658,7 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -678,6 +668,7 @@ export const getMemberLedger = async (req: AuthRequest, res: Response) => {
 export const getMemberStatement = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    await loadSubscriberForTenant(req, id);
     const subscriber = await prisma.subscriber.findUnique({
       where: { id },
       include: {
@@ -697,17 +688,7 @@ export const getMemberStatement = async (req: AuthRequest, res: Response) => {
 
     // Role check: Staff can only access statement for members of their own assigned chit groups
     if (req.user?.role === 'COLLECTION_STAFF') {
-      const staffUserId = req.user.id;
-      const staffGroups = await prisma.chitGroup.findMany({
-        where: {
-          OR: [
-            { assignedStaffId: staffUserId },
-            { staffAssignments: { some: { staffId: staffUserId } } },
-          ],
-        },
-        select: { id: true },
-      });
-      const staffGroupIds = staffGroups.map((g) => g.id);
+      const staffGroupIds = await loadStaffGroupIds(req);
       const isMember = subscriber.memberships.some((m) => staffGroupIds.includes(m.groupId));
       if (!isMember) {
         return res.status(403).json({
@@ -717,9 +698,9 @@ export const getMemberStatement = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const totalPaid = subscriber.transactions
-      .filter((t) => t.verificationStatus === 'VERIFIED' && !t.isReversed)
-      .reduce((sum, t) => sum + t.amount, 0);
+    const totalPaid = sumMoney(
+      subscriber.transactions.filter((t) => t.verificationStatus === 'VERIFIED' && !t.isReversed).map((t) => t.amount)
+    );
 
     return res.json({
       success: true,
@@ -732,7 +713,7 @@ export const getMemberStatement = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -741,8 +722,8 @@ export const getMemberStatement = async (req: AuthRequest, res: Response) => {
  */
 export const getMemberOutstanding = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId;
-    const where: any = { companyId, status: 'ACTIVE' };
+    const { companyId } = companyWhere(req);
+    const where: any = { ...(companyId ? { companyId } : {}), status: 'ACTIVE' };
 
     // Staff can only view outstanding for their assigned chit group members
     if (req.user?.role === 'COLLECTION_STAFF') {
@@ -787,17 +768,15 @@ export const getMemberOutstanding = async (req: AuthRequest, res: Response) => {
       let totalPaid = 0;
 
       for (const m of sub.memberships) {
-        for (const sch of m.group.schedules) {
-          totalDue += sch.netDueAmount;
-        }
+        totalDue = sumMoney([totalDue, ...m.group.schedules.map((sch) => sch.netDueAmount)]);
         const groupTxns = sub.transactions.filter(
           (t) => t.groupId === m.groupId && (t as any).verificationStatus === 'VERIFIED'
         );
-        totalPaid += groupTxns.reduce((s, t) => s + t.amount, 0);
+        totalPaid = sumMoney([totalPaid, ...groupTxns.map((t) => t.amount)]);
       }
 
-      const arrears = Math.max(0, totalDue - totalPaid);
-      const lateFee = arrears > 0 ? Math.round(arrears * 0.02) : 0; // 2% late charge rule
+      const arrears = Math.max(0, subtractMoney(totalDue, totalPaid));
+      const lateFee = arrears > 0 ? Math.round(arrears * 0.02) : 0; // 2% late charge rule (unchanged)
 
       return {
         id: sub.id,
@@ -809,7 +788,7 @@ export const getMemberOutstanding = async (req: AuthRequest, res: Response) => {
         totalPaid,
         arrears,
         lateFee,
-        totalPayable: arrears + lateFee,
+        totalPayable: roundMoney(arrears + lateFee),
         status: arrears === 0 ? 'CLEAN' : arrears < 10000 ? 'MILD_ARREARS' : 'CRITICAL_ARREARS',
       };
     });
@@ -820,7 +799,7 @@ export const getMemberOutstanding = async (req: AuthRequest, res: Response) => {
       data: outstandingList.sort((a, b) => b.arrears - a.arrears),
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -845,14 +824,11 @@ export const updateSubscriber = async (req: AuthRequest, res: Response) => {
       dateOfBirth,
     } = req.body;
 
-    const subscriber = await prisma.subscriber.findUnique({
+    await loadSubscriberForTenant(req, id);
+    const subscriber = await prisma.subscriber.findUniqueOrThrow({
       where: { id },
       include: { memberships: true },
     });
-
-    if (!subscriber) {
-      return res.status(404).json({ success: false, message: 'Member not found' });
-    }
 
     // Role check: Staff can only update members belonging to their assigned chit group
     if (req.user?.role === 'COLLECTION_STAFF') {
@@ -925,7 +901,7 @@ export const updateSubscriber = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, message: 'Member details updated successfully', data: updated });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -943,6 +919,7 @@ export const deleteSubscriber = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    await loadSubscriberForTenant(req, id);
     const subscriber = await prisma.subscriber.findUnique({
       where: { id },
       include: {
@@ -994,6 +971,6 @@ export const deleteSubscriber = async (req: AuthRequest, res: Response) => {
       message: `Member ${subscriber.fullName} (${subscriber.subscriberCode}) deleted successfully.`,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };

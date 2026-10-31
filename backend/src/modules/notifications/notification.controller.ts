@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { sendError } from '../../lib/http.js';
 
 // Helper: Automatically generate collection date notifications for manager and staff
 async function generateCollectionAlerts(companyId?: string) {
@@ -144,6 +145,12 @@ export const listNotifications = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 
+    // Tenant isolation: company users only see platform-wide notices (companyId null,
+    // sent by super admins) and notices that belong to their own company.
+    if (userRole !== 'SUPER_ADMIN') {
+      where = { AND: [where, { OR: [{ companyId: null }, { companyId: companyId || '__none__' }] }] };
+    }
+
     const notifications = await prisma.notification.findMany({
       where,
       orderBy: { createdAt: 'desc' },
@@ -156,7 +163,7 @@ export const listNotifications = async (req: AuthRequest, res: Response) => {
       data: notifications,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -254,7 +261,7 @@ export const getRecipients = async (req: AuthRequest, res: Response) => {
 
     return res.status(403).json({ success: false, message: 'Unauthorized' });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -431,7 +438,7 @@ export const sendNotification = async (req: AuthRequest, res: Response) => {
       data: notif,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -472,6 +479,6 @@ export const deleteNotification = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, message: 'Notification deleted successfully.' });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };

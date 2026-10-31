@@ -1,48 +1,123 @@
 import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { sendError, badRequest, notFound } from '../../lib/http.js';
+import { parsePositiveAmount, sumMoney } from '../../lib/money.js';
+import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
+import { validateImageDataUrl } from '../../lib/upload.js';
+import {
+  assertSameCompany,
+  assertStaffAssignedToGroup,
+  companyWhere,
+  isStaff,
+  loadGroupForTenant,
+  loadSubscriberForTenant,
+} from '../../security/tenant.js';
+
+// Values the existing mobile/web client sends (see CollectionsTab.tsx).
+const PAYMENT_MODES = ['CASH', 'BANK_TRANSFER', 'UPI', 'SPLIT', 'CHEQUE'];
+const INSTALLMENT_TYPES = ['REGULAR', 'ADVANCE', 'BACKLOG', 'ARREARS', 'PENALTY', 'OTHER'];
+const DIGITAL_MODES = ['BANK_TRANSFER', 'UPI', 'SPLIT'];
+
+/** Load a payment transaction visible to the caller (404 otherwise). */
+async function loadTransactionForTenant(req: AuthRequest, id: string) {
+  const transaction = await prisma.paymentTransaction.findUnique({
+    where: { id },
+    include: { subscriber: true, group: true, recordedBy: { select: { id: true, fullName: true, role: true } } },
+  });
+  if (!transaction) throw notFound('Transaction not found');
+  assertSameCompany(req, transaction.companyId, 'Transaction');
+  return transaction;
+}
 
 export const recordPayment = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId!;
-    const recordedByUserId = req.user?.id!;
+    const recordedByUserId = req.user!.id;
     const userRole = req.user?.role;
     const {
       subscriberId,
       groupId,
       installmentNo,
       amount,
-      paymentMode, // CASH, BANK_TRANSFER, UPI
-      installmentType = 'REGULAR', // REGULAR, ADVANCE, BACKLOG
+      paymentMode, // CASH, BANK_TRANSFER, UPI, SPLIT, CHEQUE
+      installmentType = 'REGULAR',
       externalRef, // Bank / UPI Txn Ref ID
       receiptPhoto, // Photo of receipt / proof of payment
       idempotencyKey,
       notes,
-    } = req.body;
+    } = req.body || {};
 
     if (!subscriberId || !groupId || !installmentNo || !amount || !paymentMode) {
       return res.status(400).json({ success: false, message: 'Missing required payment details' });
     }
 
+    const cleanAmount = parsePositiveAmount(amount);
+    if (cleanAmount === null) {
+      return res.status(400).json({ success: false, message: 'Amount must be a positive number' });
+    }
+    const instNo = Number(installmentNo);
+    if (!Number.isInteger(instNo) || instNo < 1) {
+      return res.status(400).json({ success: false, message: 'Installment number must be a positive whole number' });
+    }
+    if (!PAYMENT_MODES.includes(paymentMode)) {
+      return res.status(400).json({ success: false, message: `Invalid payment mode. Allowed: ${PAYMENT_MODES.join(', ')}` });
+    }
+    if (!INSTALLMENT_TYPES.includes(installmentType)) {
+      return res.status(400).json({ success: false, message: `Invalid installment type. Allowed: ${INSTALLMENT_TYPES.join(', ')}` });
+    }
+
     // Remark is mandatory for all collections (Cash, UPI, Bank Transfer, Split, etc.)
-    if (!notes || !notes.trim()) {
+    if (!notes || typeof notes !== 'string' || !notes.trim()) {
       return res.status(400).json({
         success: false,
         message: 'Remark is mandatory for all payment collections. For cash, state cash collection details; for UPI, Bank Transfer or Split payments, specify payment references and breakdown.',
       });
     }
 
-    if ((paymentMode === 'BANK_TRANSFER' || paymentMode === 'UPI' || paymentMode === 'SPLIT') && (!externalRef || !externalRef.trim())) {
+    if (DIGITAL_MODES.includes(paymentMode) && (!externalRef || typeof externalRef !== 'string' || !externalRef.trim())) {
       return res.status(400).json({
         success: false,
         message: 'Transaction Reference ID / UTR is required for Bank Transfer, UPI, and Split payments.',
       });
     }
 
-    // Check Idempotency Key
-    if (idempotencyKey) {
+    const cleanPhoto = validateImageDataUrl(receiptPhoto, 'Receipt photo');
+
+    // Tenant isolation: the group and the subscriber must belong to the caller's company.
+    const group = await loadGroupForTenant(req, groupId);
+    const subscriber = await loadSubscriberForTenant(req, subscriberId);
+    if (subscriber.companyId !== group.companyId) {
+      throw notFound('Subscriber not found');
+    }
+    const companyId = group.companyId;
+
+    if (instNo > Math.max(group.totalMonths, 1)) {
+      return res.status(400).json({
+        success: false,
+        message: `Installment number must be between 1 and ${group.totalMonths} for this chit group.`,
+      });
+    }
+
+    // Role check: Staff can only record collections for their assigned chit group
+    await assertStaffAssignedToGroup(req, group.id, 'Forbidden: Staff can only record collections for their assigned chit group.');
+
+    // The subscriber must be (or have been) a member of this group.
+    const [membership, priorTxCount] = await Promise.all([
+      prisma.chitGroupMember.findUnique({ where: { groupId_subscriberId: { groupId: group.id, subscriberId: subscriber.id } } }),
+      prisma.paymentTransaction.count({ where: { groupId: group.id, subscriberId: subscriber.id } }),
+    ]);
+    if (!membership && priorTxCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Member ${subscriber.fullName} is not enrolled in chit group "${group.name}".`,
+      });
+    }
+
+    // Check Idempotency Key (scoped to the company)
+    const cleanIdempotencyKey = typeof idempotencyKey === 'string' && idempotencyKey.trim() ? idempotencyKey.trim().slice(0, 100) : null;
+    if (cleanIdempotencyKey) {
       const existing = await prisma.paymentTransaction.findUnique({
-        where: { idempotencyKey },
+        where: { companyId_idempotencyKey: { companyId, idempotencyKey: cleanIdempotencyKey } },
         include: { receipt: true, subscriber: true, group: true },
       });
       if (existing) {
@@ -50,64 +125,47 @@ export const recordPayment = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const subscriber = await prisma.subscriber.findUnique({ where: { id: subscriberId } });
-    if (!subscriber) {
-      return res.status(404).json({ success: false, message: 'Subscriber not found' });
-    }
-
-    const group = await prisma.chitGroup.findUnique({ where: { id: groupId } });
-    if (!group) {
-      return res.status(404).json({ success: false, message: 'Chit group not found' });
-    }
-
-    // Role check: Staff can only record collections for their assigned chit group
-    if (userRole === 'COLLECTION_STAFF') {
-      const staffUserId = req.user!.id;
-      const isStaffGroup =
-        group.assignedStaffId === staffUserId ||
-        (await prisma.chitGroupStaff.findUnique({
-          where: {
-            groupId_staffId: {
-              groupId: group.id,
-              staffId: staffUserId,
-            },
-          },
-        }));
-
-      if (!isStaffGroup) {
-        return res.status(403).json({
-          success: false,
-          message: 'Forbidden: Staff can only record collections for their assigned chit group.',
-        });
-      }
-    }
-
-    // Generate Unique Receipt Number with Company Prefix (FR-COMP-011) e.g. REC-2026-00001
-    const company = await prisma.company.findUnique({ where: { id: companyId }, select: { receiptPrefix: true } });
-    const prefix = company?.receiptPrefix || 'RCT';
-    const totalCount = await prisma.paymentTransaction.count({ where: { companyId } });
-    const receiptNo = `${prefix}-${new Date().getFullYear()}-${String(totalCount + 1).padStart(5, '0')}`;
-
     // Staff can only collect and send collection receipt to manager for approval (PENDING_VERIFICATION)
     // Managers can directly collect, receive and approve payment (VERIFIED)
     const verificationStatus = userRole === 'COLLECTION_STAFF' ? 'PENDING_VERIFICATION' : 'VERIFIED';
 
+    const company = await prisma.company.findUnique({ where: { id: companyId }, select: { receiptPrefix: true } });
+    const prefix = company?.receiptPrefix || 'RCT';
+    const year = new Date().getFullYear();
+
     // Execute in Database Transaction
     const result = await prisma.$transaction(async (tx) => {
+      // Generate Unique Receipt Number with Company Prefix (FR-COMP-011) e.g. REC-2026-00001.
+      // Allocated atomically per company and year (previously count()+1, which raced).
+      const seqKey = `receipt:${prefix}:${year}`;
+      const seq = await nextSequence(
+        companyId,
+        seqKey,
+        async () => {
+          const existing = await tx.paymentTransaction.findMany({
+            where: { companyId, receiptNo: { startsWith: `${prefix}-${year}-` } },
+            select: { receiptNo: true },
+          });
+          return maxNumericSuffix(existing.map((e) => e.receiptNo), `${prefix}-${year}-`);
+        },
+        tx
+      );
+      const receiptNo = `${prefix}-${year}-${String(seq).padStart(5, '0')}`;
+
       const transaction = await tx.paymentTransaction.create({
         data: {
           companyId,
-          subscriberId,
-          groupId,
-          installmentNo: Number(installmentNo),
-          amount: Number(amount),
+          subscriberId: subscriber.id,
+          groupId: group.id,
+          installmentNo: instNo,
+          amount: cleanAmount,
           paymentMode,
           installmentType,
           receiptNo,
-          externalRef: externalRef ? externalRef.trim() : null,
-          receiptPhoto: receiptPhoto || null,
+          externalRef: externalRef ? String(externalRef).trim().slice(0, 200) : null,
+          receiptPhoto: cleanPhoto,
           recordedByUserId,
-          idempotencyKey: idempotencyKey || null,
+          idempotencyKey: cleanIdempotencyKey,
           verificationStatus,
           notes: notes.trim(),
         },
@@ -129,11 +187,11 @@ export const recordPayment = async (req: AuthRequest, res: Response) => {
           entityId: transaction.id,
           details: JSON.stringify({
             receiptNo,
-            amount,
+            amount: cleanAmount,
             paymentMode,
             installmentType,
             verificationStatus,
-            subscriberId,
+            subscriberId: subscriber.id,
             notes: notes.trim(),
           }),
         },
@@ -157,21 +215,15 @@ export const recordPayment = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const listTransactions = async (req: AuthRequest, res: Response) => {
   try {
-    let companyId = req.user?.companyId;
-    if (!companyId) {
-      const firstCo = await prisma.company.findFirst();
-      companyId = firstCo?.id;
-    }
     const { subscriberId, groupId, paymentMode, verificationStatus } = req.query;
 
-    const where: any = {};
-    if (companyId) where.companyId = companyId;
+    const where: any = { ...companyWhere(req) };
 
     if (subscriberId) where.subscriberId = String(subscriberId);
     if (groupId) where.groupId = String(groupId);
@@ -195,19 +247,19 @@ export const listTransactions = async (req: AuthRequest, res: Response) => {
 
     const approvedTransactions = transactions.filter((t) => t.verificationStatus === 'VERIFIED' && !t.isReversed);
     const approvedCount = approvedTransactions.length;
-    const approvedAmount = approvedTransactions.reduce((acc, t) => acc + t.amount, 0);
+    const approvedAmount = sumMoney(approvedTransactions.map((t) => t.amount));
 
     const pendingTransactions = transactions.filter((t) => t.verificationStatus === 'PENDING_VERIFICATION');
     const pendingCount = pendingTransactions.length;
-    const pendingAmount = pendingTransactions.reduce((acc, t) => acc + t.amount, 0);
+    const pendingAmount = sumMoney(pendingTransactions.map((t) => t.amount));
 
     const rejectedTransactions = transactions.filter((t) => t.verificationStatus === 'REJECTED');
     const rejectedCount = rejectedTransactions.length;
-    const rejectedAmount = rejectedTransactions.reduce((acc, t) => acc + t.amount, 0);
+    const rejectedAmount = sumMoney(rejectedTransactions.map((t) => t.amount));
 
-    const digitalCount = approvedTransactions.filter((t) => t.paymentMode === 'BANK_TRANSFER' || t.paymentMode === 'UPI' || t.paymentMode === 'SPLIT').length;
+    const digitalCount = approvedTransactions.filter((t) => DIGITAL_MODES.includes(t.paymentMode)).length;
     const cashCount = approvedTransactions.filter((t) => t.paymentMode === 'CASH').length;
-    const approvedCashAmount = approvedTransactions.filter((t) => t.paymentMode === 'CASH').reduce((acc, t) => acc + t.amount, 0);
+    const approvedCashAmount = sumMoney(approvedTransactions.filter((t) => t.paymentMode === 'CASH').map((t) => t.amount));
 
     return res.json({
       success: true,
@@ -226,99 +278,98 @@ export const listTransactions = async (req: AuthRequest, res: Response) => {
       data: transactions,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
+/** Find a receipt's transaction by receipt number within the caller's company. */
+async function findTransactionByReceiptNo(req: AuthRequest, receiptNo: string) {
+  const transaction = await prisma.paymentTransaction.findFirst({
+    where: { receiptNo, ...companyWhere(req) },
+    include: {
+      subscriber: true,
+      group: true,
+      recordedBy: { select: { fullName: true, phone: true } },
+      company: true,
+      receipt: true,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!transaction) throw notFound('Receipt not found');
+  if (isStaff(req)) {
+    // Staff may view receipts they recorded or for their assigned groups.
+    if (transaction.recordedByUserId !== req.user!.id) {
+      await assertStaffAssignedToGroup(req, transaction.groupId);
+    }
+  }
+  return transaction;
+}
+
 export const getReceiptDetails = async (req: AuthRequest, res: Response) => {
   try {
-    const { receiptNo } = req.params;
-    const transaction = await prisma.paymentTransaction.findUnique({
-      where: { receiptNo },
-      include: {
-        subscriber: true,
-        group: true,
-        recordedBy: { select: { fullName: true, phone: true } },
-        company: true,
-        receipt: true,
-      },
-    });
-
-    if (!transaction) {
-      return res.status(404).json({ success: false, message: 'Receipt not found' });
-    }
-
+    const transaction = await findTransactionByReceiptNo(req, String(req.params.receiptNo));
     return res.json({ success: true, data: transaction });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 // AC-11 Receipt Reprint tracking
 export const reprintReceipt = async (req: AuthRequest, res: Response) => {
   try {
-    const { receiptNo } = req.params;
-    const receipt = await prisma.receipt.findUnique({
-      where: { receiptNo },
-      include: {
-        transaction: {
-          include: {
-            subscriber: true,
-            group: true,
-            company: true,
-          },
-        },
-      },
-    });
-
-    if (!receipt) {
-      return res.status(404).json({ success: false, message: 'Receipt not found' });
-    }
+    const transaction = await findTransactionByReceiptNo(req, String(req.params.receiptNo));
+    if (!transaction.receipt) throw notFound('Receipt not found');
 
     const updated = await prisma.receipt.update({
-      where: { receiptNo },
+      where: { id: transaction.receipt.id },
       data: { printedCount: { increment: 1 } },
     });
 
+    const { receipt, ...txWithoutReceipt } = transaction;
     return res.json({
       success: true,
       message: `Receipt reprinted (Print count: ${updated.printedCount})`,
-      data: { ...receipt, printedCount: updated.printedCount },
+      data: { ...receipt, transaction: txWithoutReceipt, printedCount: updated.printedCount },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 // AC-12 Payment Reconciliation
 export const reconcilePayments = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId!;
-    const userId = req.user?.id!;
-    const { transactionIds, status = 'VERIFIED', notes } = req.body;
+    const userId = req.user!.id;
+    const { transactionIds, status = 'VERIFIED', notes } = req.body || {};
 
-    if (!Array.isArray(transactionIds) || transactionIds.length === 0) {
+    if (!Array.isArray(transactionIds) || transactionIds.length === 0 || !transactionIds.every((t) => typeof t === 'string')) {
       return res.status(400).json({ success: false, message: 'transactionIds array required' });
     }
+    if (!['VERIFIED', 'PENDING_VERIFICATION', 'REJECTED'].includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid reconciliation status' });
+    }
 
+    const scope = companyWhere(req);
+    // Reversed transactions are final and are never re-opened by reconciliation.
     const updated = await prisma.paymentTransaction.updateMany({
       where: {
         id: { in: transactionIds },
-        companyId,
+        isReversed: false,
+        ...scope,
       },
       data: {
         verificationStatus: status,
-        notes: notes ? `Reconciliation: ${notes}` : undefined,
+        notes: notes ? `Reconciliation: ${String(notes).slice(0, 500)}` : undefined,
       },
     });
 
     await prisma.auditLog.create({
       data: {
-        companyId,
+        companyId: scope.companyId || null,
         userId,
         action: 'RECONCILE_PAYMENTS',
         entity: 'PaymentTransaction',
-        entityId: transactionIds.join(','),
+        entityId: transactionIds.join(',').slice(0, 1000),
         details: JSON.stringify({ count: updated.count, status, notes }),
       },
     });
@@ -329,48 +380,41 @@ export const reconcilePayments = async (req: AuthRequest, res: Response) => {
       count: updated.count,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 // AC-13 Payment Correction / Reversal
 export const reverseTransaction = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId!;
-    const userId = req.user?.id!;
+    const userId = req.user!.id;
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason } = req.body || {};
 
-    if (!reason) {
+    if (!reason || typeof reason !== 'string' || !reason.trim()) {
       return res.status(400).json({ success: false, message: 'Reversal reason is mandatory' });
     }
 
-    const transaction = await prisma.paymentTransaction.findUnique({
-      where: { id },
-    });
+    const transaction = await loadTransactionForTenant(req, id);
 
-    if (!transaction) {
-      return res.status(404).json({ success: false, message: 'Transaction not found' });
-    }
-
-    if (transaction.isReversed) {
-      return res.status(400).json({ success: false, message: 'Transaction has already been reversed' });
-    }
-
-    // Process reversal preserving original record
+    // Process reversal preserving original record. The conditional update makes
+    // concurrent reversals of the same transaction impossible.
     const updated = await prisma.$transaction(async (tx) => {
-      const revTx = await tx.paymentTransaction.update({
-        where: { id },
+      const result = await tx.paymentTransaction.updateMany({
+        where: { id, isReversed: false },
         data: {
           isReversed: true,
-          reversalReason: reason,
+          reversalReason: reason.trim(),
           verificationStatus: 'REVERSED',
         },
       });
+      if (result.count === 0) {
+        throw badRequest('Transaction has already been reversed');
+      }
 
       await tx.auditLog.create({
         data: {
-          companyId,
+          companyId: transaction.companyId,
           userId,
           action: 'PAYMENT_REVERSAL',
           entity: 'PaymentTransaction',
@@ -379,12 +423,12 @@ export const reverseTransaction = async (req: AuthRequest, res: Response) => {
             originalAmount: transaction.amount,
             receiptNo: transaction.receiptNo,
             subscriberId: transaction.subscriberId,
-            reason,
+            reason: reason.trim(),
           }),
         },
       });
 
-      return revTx;
+      return tx.paymentTransaction.findUniqueOrThrow({ where: { id } });
     });
 
     return res.json({
@@ -393,42 +437,38 @@ export const reverseTransaction = async (req: AuthRequest, res: Response) => {
       data: updated,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 // Manager / Super Admin: Approve Staff Digital Receipt
 export const approveTransaction = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId!;
-    const userId = req.user?.id!;
+    const userId = req.user!.id;
     const { id } = req.params;
 
-    const transaction = await prisma.paymentTransaction.findUnique({
-      where: { id },
-      include: { subscriber: true, group: true, recordedBy: true },
-    });
-
-    if (!transaction) {
-      return res.status(404).json({ success: false, message: 'Transaction not found' });
-    }
+    const transaction = await loadTransactionForTenant(req, id);
 
     if (transaction.verificationStatus === 'VERIFIED') {
       return res.status(400).json({ success: false, message: 'Transaction is already verified / approved' });
     }
+    if (transaction.isReversed || transaction.verificationStatus === 'REVERSED') {
+      return res.status(400).json({ success: false, message: 'Reversed transactions cannot be approved' });
+    }
 
     const updated = await prisma.$transaction(async (tx) => {
-      const appTx = await tx.paymentTransaction.update({
-        where: { id },
+      const result = await tx.paymentTransaction.updateMany({
+        where: { id, isReversed: false, verificationStatus: { in: ['PENDING_VERIFICATION', 'REJECTED'] } },
         data: {
           verificationStatus: 'VERIFIED',
           rejectionReason: null,
         },
       });
+      if (result.count === 0) throw badRequest('Transaction is no longer awaiting approval');
 
       await tx.auditLog.create({
         data: {
-          companyId,
+          companyId: transaction.companyId,
           userId,
           action: 'APPROVE_PAYMENT_TRANSACTION',
           entity: 'PaymentTransaction',
@@ -442,7 +482,7 @@ export const approveTransaction = async (req: AuthRequest, res: Response) => {
         },
       });
 
-      return appTx;
+      return tx.paymentTransaction.findUniqueOrThrow({ where: { id } });
     });
 
     return res.json({
@@ -451,29 +491,24 @@ export const approveTransaction = async (req: AuthRequest, res: Response) => {
       data: updated,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 // Manager / Super Admin: Reject Staff Digital Receipt
 export const rejectTransaction = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId!;
-    const userId = req.user?.id!;
+    const userId = req.user!.id;
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason } = req.body || {};
 
-    if (!reason || !reason.trim()) {
+    if (!reason || typeof reason !== 'string' || !reason.trim()) {
       return res.status(400).json({ success: false, message: 'Rejection reason is required' });
     }
 
-    const transaction = await prisma.paymentTransaction.findUnique({
-      where: { id },
-      include: { subscriber: true, group: true, recordedBy: true },
-    });
-
-    if (!transaction) {
-      return res.status(404).json({ success: false, message: 'Transaction not found' });
+    const transaction = await loadTransactionForTenant(req, id);
+    if (transaction.isReversed || transaction.verificationStatus === 'REVERSED') {
+      return res.status(400).json({ success: false, message: 'Reversed transactions cannot be rejected' });
     }
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -487,7 +522,7 @@ export const rejectTransaction = async (req: AuthRequest, res: Response) => {
 
       await tx.auditLog.create({
         data: {
-          companyId,
+          companyId: transaction.companyId,
           userId,
           action: 'REJECT_PAYMENT_TRANSACTION',
           entity: 'PaymentTransaction',
@@ -510,7 +545,7 @@ export const rejectTransaction = async (req: AuthRequest, res: Response) => {
       data: updated,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -520,16 +555,14 @@ export const rejectTransaction = async (req: AuthRequest, res: Response) => {
 export const updateReceiptPhoto = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { receiptPhoto } = req.body;
+    const { receiptPhoto } = req.body || {};
 
-    if (!receiptPhoto) {
+    const cleanPhoto = validateImageDataUrl(receiptPhoto, 'Receipt photo');
+    if (!cleanPhoto) {
       return res.status(400).json({ success: false, message: 'Receipt photo is required' });
     }
 
-    const tx = await prisma.paymentTransaction.findUnique({ where: { id } });
-    if (!tx) {
-      return res.status(404).json({ success: false, message: 'Transaction not found' });
-    }
+    const tx = await loadTransactionForTenant(req, id);
 
     // Role check: staff can only update their own transactions
     if (req.user?.role === 'COLLECTION_STAFF' && tx.recordedByUserId !== req.user.id) {
@@ -538,7 +571,7 @@ export const updateReceiptPhoto = async (req: AuthRequest, res: Response) => {
 
     const updated = await prisma.paymentTransaction.update({
       where: { id },
-      data: { receiptPhoto },
+      data: { receiptPhoto: cleanPhoto },
     });
 
     return res.json({
@@ -547,6 +580,6 @@ export const updateReceiptPhoto = async (req: AuthRequest, res: Response) => {
       data: updated,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };

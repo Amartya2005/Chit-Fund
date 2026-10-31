@@ -1,6 +1,12 @@
 import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { addMoney, parsePositiveAmount, roundMoney, subtractMoney } from '../../lib/money.js';
+import { sendError } from '../../lib/http.js';
+import { validateImageDataUrl } from '../../lib/upload.js';
+import { assertUsersInCompany } from '../../security/tenant.js';
+
+const KHATA_PAYMENT_MODES = ['CASH', 'UPI', 'BANK_TRANSFER', 'CHEQUE', 'OTHER'];
 
 /**
  * Check if the user has access to the specified business:
@@ -45,7 +51,7 @@ export const listBusinesses = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
-    let whereClause: any = { status: 'ACTIVE' };
+    const whereClause: any = { status: 'ACTIVE' };
 
     if (role === 'SUPER_ADMIN') {
       if (companyId) whereClause.companyId = companyId;
@@ -117,16 +123,16 @@ export const listBusinesses = async (req: AuthRequest, res: Response) => {
         customers.forEach((cust) => {
           const totalGave = cust.transactions
             .filter((t) => t.type === 'GAVE')
-            .reduce((sum, t) => sum + t.amount, 0);
+            .reduce((sum, t) => addMoney(sum, t.amount), 0);
           const totalGot = cust.transactions
             .filter((t) => t.type === 'GOT')
-            .reduce((sum, t) => sum + t.amount, 0);
+            .reduce((sum, t) => addMoney(sum, t.amount), 0);
 
-          const net = cust.openingBalance + totalGave - totalGot;
+          const net = subtractMoney(addMoney(cust.openingBalance, totalGave), totalGot);
           if (net > 0) {
-            totalYouWillGet += net;
+            totalYouWillGet = addMoney(totalYouWillGet, net);
           } else if (net < 0) {
-            totalYouWillGive += Math.abs(net);
+            totalYouWillGive = addMoney(totalYouWillGive, Math.abs(net));
           }
         });
 
@@ -145,7 +151,7 @@ export const listBusinesses = async (req: AuthRequest, res: Response) => {
           customerCount: b._count.customers,
           totalYouWillGet,
           totalYouWillGive,
-          netBalance: totalYouWillGet - totalYouWillGive,
+          netBalance: subtractMoney(totalYouWillGet, totalYouWillGive),
         };
       })
     );
@@ -156,7 +162,7 @@ export const listBusinesses = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error listing businesses:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to list businesses' });
+    return sendError(res, error);
   }
 };
 
@@ -174,10 +180,13 @@ export const createBusiness = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ success: false, message: 'Only managers can create businesses' });
     }
 
-    const { name, category, phone, address, currency, staffIds } = req.body;
+    const { name, category, phone, address, currency, staffIds } = req.body || {};
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ success: false, message: 'Business name is required' });
+    }
+    if (Array.isArray(staffIds) && staffIds.length > 0) {
+      await assertUsersInCompany(staffIds, companyId);
     }
 
     const business = await prisma.business.create({
@@ -221,7 +230,7 @@ export const createBusiness = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error creating business:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to create business' });
+    return sendError(res, error);
   }
 };
 
@@ -257,7 +266,7 @@ export const updateBusiness = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error updating business:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to update business' });
+    return sendError(res, error);
   }
 };
 
@@ -283,7 +292,7 @@ export const deleteBusiness = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error deleting business:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to delete business' });
+    return sendError(res, error);
   }
 };
 
@@ -296,6 +305,11 @@ export const getBusinessStaff = async (req: AuthRequest, res: Response) => {
 
     if (!userId || !role) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    const hasAccess = await verifyBusinessAccess(userId, role, businessId, companyId);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied to this business' });
     }
 
     // Get all collection staff in company
@@ -334,7 +348,7 @@ export const getBusinessStaff = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error getting business staff:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to get staff list' });
+    return sendError(res, error);
   }
 };
 
@@ -350,10 +364,12 @@ export const assignStaffToBusiness = async (req: AuthRequest, res: Response) => 
       return res.status(403).json({ success: false, message: 'Not authorized to manage staff for this business' });
     }
 
-    const { staffIds } = req.body;
+    const { staffIds } = req.body || {};
     if (!Array.isArray(staffIds)) {
       return res.status(400).json({ success: false, message: 'staffIds must be an array of user IDs' });
     }
+    const business = await prisma.business.findUnique({ where: { id: businessId }, select: { companyId: true } });
+    await assertUsersInCompany(staffIds, business?.companyId ?? companyId);
 
     // Remove existing assignments and replace with new ones
     await prisma.$transaction([
@@ -393,7 +409,7 @@ export const assignStaffToBusiness = async (req: AuthRequest, res: Response) => 
     });
   } catch (error: any) {
     console.error('Error assigning staff:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to assign staff' });
+    return sendError(res, error);
   }
 };
 
@@ -418,7 +434,7 @@ export const listCustomers = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ success: false, message: 'Access denied to this business' });
     }
 
-    let customerWhere: any = {
+    const customerWhere: any = {
       businessId,
       status: 'ACTIVE',
     };
@@ -469,19 +485,19 @@ export const listCustomers = async (req: AuthRequest, res: Response) => {
 
         const totalGave = allTxs
           .filter((t) => t.type === 'GAVE')
-          .reduce((sum, t) => sum + t.amount, 0);
+          .reduce((sum, t) => addMoney(sum, t.amount), 0);
         const totalGot = allTxs
           .filter((t) => t.type === 'GOT')
-          .reduce((sum, t) => sum + t.amount, 0);
+          .reduce((sum, t) => addMoney(sum, t.amount), 0);
 
         // netBalance: > 0 means customer owes shop ("You will get")
         // < 0 means shop owes customer ("You will give")
-        const netBalance = c.openingBalance + totalGave - totalGot;
+        const netBalance = subtractMoney(addMoney(c.openingBalance, totalGave), totalGot);
 
         if (netBalance > 0) {
-          totalYouWillGet += netBalance;
+          totalYouWillGet = addMoney(totalYouWillGet, netBalance);
         } else if (netBalance < 0) {
-          totalYouWillGive += Math.abs(netBalance);
+          totalYouWillGive = addMoney(totalYouWillGive, Math.abs(netBalance));
         }
 
         const lastTx = allTxs[0] || null;
@@ -533,7 +549,7 @@ export const listCustomers = async (req: AuthRequest, res: Response) => {
         summary: {
           totalYouWillGet,
           totalYouWillGive,
-          netBalance: totalYouWillGet - totalYouWillGive,
+          netBalance: subtractMoney(totalYouWillGet, totalYouWillGive),
           totalCustomers: customers.length,
         },
         customers: filteredList,
@@ -541,7 +557,7 @@ export const listCustomers = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error listing customers:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to list customers' });
+    return sendError(res, error);
   }
 };
 
@@ -567,7 +583,7 @@ export const createCustomer = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: 'Customer name is required' });
     }
 
-    let rawOpening = Number(openingBalance) || 0;
+    let rawOpening = roundMoney(Number(openingBalance) || 0);
     // If openingType is 'YOU_WILL_GIVE', negative opening balance
     if (openingType === 'YOU_WILL_GIVE') {
       rawOpening = -Math.abs(rawOpening);
@@ -593,7 +609,7 @@ export const createCustomer = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error creating customer:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to add customer' });
+    return sendError(res, error);
   }
 };
 
@@ -644,11 +660,11 @@ export const getCustomerDetails = async (req: AuthRequest, res: Response) => {
     let totalGot = 0;
 
     customer.transactions.forEach((tx) => {
-      if (tx.type === 'GAVE') totalGave += tx.amount;
-      if (tx.type === 'GOT') totalGot += tx.amount;
+      if (tx.type === 'GAVE') totalGave = addMoney(totalGave, tx.amount);
+      if (tx.type === 'GOT') totalGot = addMoney(totalGot, tx.amount);
     });
 
-    const netBalance = customer.openingBalance + totalGave - totalGot;
+    const netBalance = subtractMoney(addMoney(customer.openingBalance, totalGave), totalGot);
 
     res.json({
       success: true,
@@ -661,7 +677,7 @@ export const getCustomerDetails = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error getting customer details:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to get customer details' });
+    return sendError(res, error);
   }
 };
 
@@ -703,7 +719,7 @@ export const updateCustomer = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error updating customer:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to update customer' });
+    return sendError(res, error);
   }
 };
 
@@ -737,7 +753,7 @@ export const deleteCustomer = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error deleting customer:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to delete customer' });
+    return sendError(res, error);
   }
 };
 
@@ -775,9 +791,17 @@ export const addTransaction = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: "Transaction type must be 'GAVE' (Maine Diye) or 'GOT' (Mujhe Mile)" });
     }
 
-    const parsedAmount = Number(amount);
-    if (!parsedAmount || parsedAmount <= 0) {
+    const parsedAmount = parsePositiveAmount(amount);
+    if (parsedAmount === null) {
       return res.status(400).json({ success: false, message: 'Transaction amount must be greater than zero' });
+    }
+    if (paymentMode && !KHATA_PAYMENT_MODES.includes(paymentMode)) {
+      return res.status(400).json({ success: false, message: `Invalid payment mode. Allowed: ${KHATA_PAYMENT_MODES.join(', ')}` });
+    }
+    const cleanBillPhoto = validateImageDataUrl(billPhoto, 'Bill photo');
+    const txDate = transactionDate ? new Date(transactionDate) : new Date();
+    if (Number.isNaN(txDate.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid transaction date' });
     }
 
     const tx = await prisma.khataTransaction.create({
@@ -786,10 +810,10 @@ export const addTransaction = async (req: AuthRequest, res: Response) => {
         type,
         amount: parsedAmount,
         description: description?.trim() || null,
-        billPhoto: billPhoto || null,
+        billPhoto: cleanBillPhoto,
         paymentMode: paymentMode || 'CASH',
         recordedByUserId: userId,
-        transactionDate: transactionDate ? new Date(transactionDate) : new Date(),
+        transactionDate: txDate,
       },
       include: {
         recordedBy: {
@@ -815,7 +839,7 @@ export const addTransaction = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error adding transaction:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to record transaction' });
+    return sendError(res, error);
   }
 };
 
@@ -857,7 +881,7 @@ export const deleteTransaction = async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error deleting transaction:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to delete transaction' });
+    return sendError(res, error);
   }
 };
 
@@ -981,15 +1005,15 @@ export const getBusinessCashflowAndStaffMonitoring = async (req: AuthRequest, re
       dailyMap[dayKey].count += 1;
 
       if (tx.type === 'GOT') {
-        totalCashIn += amt;
-        dailyMap[dayKey].cashIn += amt;
-        dailyMap[dayKey].netFlow += amt;
-        if (tx.paymentMode === 'CASH') cashPayments += amt;
-        else digitalPayments += amt;
+        totalCashIn = addMoney(totalCashIn, amt);
+        dailyMap[dayKey].cashIn = addMoney(dailyMap[dayKey].cashIn, amt);
+        dailyMap[dayKey].netFlow = addMoney(dailyMap[dayKey].netFlow, amt);
+        if (tx.paymentMode === 'CASH') cashPayments = addMoney(cashPayments, amt);
+        else digitalPayments = addMoney(digitalPayments, amt);
       } else {
-        totalCashOut += amt;
-        dailyMap[dayKey].cashOut += amt;
-        dailyMap[dayKey].netFlow -= amt;
+        totalCashOut = addMoney(totalCashOut, amt);
+        dailyMap[dayKey].cashOut = addMoney(dailyMap[dayKey].cashOut, amt);
+        dailyMap[dayKey].netFlow = subtractMoney(dailyMap[dayKey].netFlow, amt);
       }
     });
 
@@ -1025,11 +1049,11 @@ export const getBusinessCashflowAndStaffMonitoring = async (req: AuthRequest, re
 
         const staffCashIn = staffTxs
           .filter((t) => t.type === 'GOT')
-          .reduce((sum, t) => sum + t.amount, 0);
+          .reduce((sum, t) => addMoney(sum, t.amount), 0);
 
         const staffCreditGiven = staffTxs
           .filter((t) => t.type === 'GAVE')
-          .reduce((sum, t) => sum + t.amount, 0);
+          .reduce((sum, t) => addMoney(sum, t.amount), 0);
 
         return {
           id: staffUser.id,
@@ -1071,6 +1095,6 @@ export const getBusinessCashflowAndStaffMonitoring = async (req: AuthRequest, re
     });
   } catch (error: any) {
     console.error('Error in getBusinessCashflowAndStaffMonitoring:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to get cashflow and staff monitoring' });
+    return sendError(res, error);
   }
 };

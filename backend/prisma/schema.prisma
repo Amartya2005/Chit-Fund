@@ -2,7 +2,7 @@
 
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
@@ -12,138 +12,147 @@ datasource db {
 }
 
 model Company {
-  id                    String   @id @default(uuid())
-  code                  String   @unique
-  name                  String
-  stateRegistrationNo   String?
-  address               String?
-  phone                 String?
-  email                 String?
-  receiptPrefix         String?  @default("REC")
-  settings              String?  // JSON formatted business settings
-  status                String   @default("ACTIVE") // ACTIVE, SUSPENDED, DEACTIVATED
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                  String   @id @default(uuid())
+  code                String   @unique
+  name                String
+  stateRegistrationNo String?
+  address             String?
+  phone               String?
+  email               String?
+  receiptPrefix       String?  @default("REC")
+  settings            String? // JSON formatted business settings
+  status              String   @default("ACTIVE") // ACTIVE, SUSPENDED, DEACTIVATED
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
-  users                 User[]
-  subscribers           Subscriber[]
-  chitGroups            ChitGroup[]
-  transactions          PaymentTransaction[]
-  auditLogs             AuditLog[]
-  accounts              Account[]
-  journalEntries        JournalEntry[]
-  refunds               Refund[]
-  handovers             CashHandover[]
-  expenses              Expense[]
-  businesses            Business[]
+  users          User[]
+  subscribers    Subscriber[]
+  chitGroups     ChitGroup[]
+  transactions   PaymentTransaction[]
+  auditLogs      AuditLog[]
+  accounts       Account[]
+  journalEntries JournalEntry[]
+  refunds        Refund[]
+  handovers      CashHandover[]
+  expenses       Expense[]
+  businesses     Business[]
+  sequences      CompanySequence[]
 }
 
 model User {
-  id           String   @id @default(uuid())
-  companyId    String?
-  role         String   // SUPER_ADMIN, MANAGER, COLLECTION_STAFF
-  username     String   @unique
-  fullName     String
-  phone        String   @unique
-  email        String?
-  passwordHash String
-  status       String   @default("ACTIVE") // ACTIVE, INACTIVE, SUSPENDED
-  aadhaarNo    String?
-  panNo        String?
-  address      String?
+  id               String   @id @default(uuid())
+  companyId        String?
+  role             String // SUPER_ADMIN, MANAGER, COLLECTION_STAFF
+  username         String   @unique
+  fullName         String
+  phone            String   @unique
+  email            String?  @unique
+  passwordHash     String
+  status           String   @default("ACTIVE") // ACTIVE, INACTIVE, SUSPENDED
+  aadhaarNo        String?
+  panNo            String?
+  address          String?
   emergencyContact String?
-  dateOfBirth  String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  dateOfBirth      String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  company      Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
-  
-  assignedSubscribers Subscriber[] @relation("AssignedStaff")
-  assignedChitGroups   ChitGroup[] @relation("ChitGroupStaff")
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  assignedSubscribers  Subscriber[]         @relation("AssignedStaff")
+  assignedChitGroups   ChitGroup[]          @relation("ChitGroupStaff")
   chitGroupAssignments ChitGroupStaff[]
   recordedTransactions PaymentTransaction[] @relation("RecordedBy")
-  approvedPayouts     Payout[] @relation("ApprovedBy")
-  submittedHandovers  CashHandover[] @relation("StaffHandover")
-  verifiedHandovers   CashHandover[] @relation("ManagerVerification")
-  auditLogs           AuditLog[]
-  refreshTokens       RefreshToken[]
-  linkedSubscribers   Subscriber[] @relation("UserSubscriber")
-  
-  managedBusinesses         Business[]          @relation("ManagerBusinesses")
-  assignedBusinesses        BusinessStaff[]     @relation("StaffAssignedBusinesses")
-  createdKhataCustomers     KhataCustomer[]     @relation("CustomerCreator")
-  recordedKhataTransactions KhataTransaction[]  @relation("KhataTxRecorder")
+  approvedPayouts      Payout[]             @relation("ApprovedBy")
+  submittedHandovers   CashHandover[]       @relation("StaffHandover")
+  verifiedHandovers    CashHandover[]       @relation("ManagerVerification")
+  auditLogs            AuditLog[]
+  refreshTokens        RefreshToken[]
+  linkedSubscribers    Subscriber[]         @relation("UserSubscriber")
+
+  managedBusinesses         Business[]         @relation("ManagerBusinesses")
+  assignedBusinesses        BusinessStaff[]    @relation("StaffAssignedBusinesses")
+  createdKhataCustomers     KhataCustomer[]    @relation("CustomerCreator")
+  recordedKhataTransactions KhataTransaction[] @relation("KhataTxRecorder")
+
+  @@index([companyId, role])
 }
 
 model Subscriber {
-  id                  String   @id @default(uuid())
+  id                  String    @id @default(uuid())
   companyId           String
   assignedStaffId     String?
   userId              String?
-  subscriberCode      String   @unique
+  subscriberCode      String
   fullName            String
-  phone               String   @unique
+  phone               String
   email               String?
   address             String?
   aadhaarNo           String?
   panNo               String?
   dateOfBirth         String?
-  kycStatus           String   @default("PENDING") // PENDING, VERIFIED, REJECTED
+  kycStatus           String    @default("PENDING") // PENDING, VERIFIED, REJECTED
   kycNotes            String?
   kycVerifiedAt       DateTime?
   kycVerifiedByUserId String?
-  idProofType         String?  // AADHAAR, PAN, VOTER_ID, PASSPORT
+  idProofType         String? // AADHAAR, PAN, VOTER_ID, PASSPORT
   idProofNumber       String?
   nomineeName         String?
   nomineeRelation     String?
   nomineePhone        String?
-  status              String   @default("ACTIVE") // ACTIVE, SUSPENDED, DEACTIVATED
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  status              String    @default("ACTIVE") // ACTIVE, SUSPENDED, DEACTIVATED
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
-  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  assignedStaff  User?    @relation("AssignedStaff", fields: [assignedStaffId], references: [id])
-  user           User?    @relation("UserSubscriber", fields: [userId], references: [id], onDelete: SetNull)
+  company       Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignedStaff User?   @relation("AssignedStaff", fields: [assignedStaffId], references: [id])
+  user          User?   @relation("UserSubscriber", fields: [userId], references: [id], onDelete: SetNull)
 
-  memberships    ChitGroupMember[]
-  transactions   PaymentTransaction[]
-  payouts        Payout[]
-  auctionBids    AuctionBid[]
-  auctionsWon    Auction[] @relation("AuctionWinner")
-  refunds        Refund[]
+  memberships  ChitGroupMember[]
+  transactions PaymentTransaction[]
+  payouts      Payout[]
+  auctionBids  AuctionBid[]
+  auctionsWon  Auction[]            @relation("AuctionWinner")
+  refunds      Refund[]
 
+  @@unique([companyId, subscriberCode])
+  @@unique([companyId, phone])
   @@index([companyId, status])
-  @@index([companyId, phone])
+  @@index([assignedStaffId])
+  @@index([userId])
 }
 
 model ChitGroup {
   id                   String   @id @default(uuid())
   companyId            String
-  groupCode            String   @unique
+  groupCode            String
   name                 String
-  chitValue            Float    // Total Pool Amount e.g. 500000.00
-  maxMembers           Int      // e.g. 20 members
-  totalMonths          Int      // e.g. 20 months
-  monthlyInstallment   Float    // Scheduled monthly installment e.g. 25000.00
-  foremanCommissionPct Float    @default(5.0) // 5%
-  startDate            String   // YYYY-MM-DD
-  endDate              String?  // YYYY-MM-DD
+  chitValue            Decimal  @db.Decimal(15, 2) // Total Pool Amount e.g. 500000.00
+  maxMembers           Int // e.g. 20 members
+  totalMonths          Int // e.g. 20 months
+  monthlyInstallment   Decimal  @db.Decimal(15, 2) // Scheduled monthly installment e.g. 25000.00
+  foremanCommissionPct Decimal  @default(5.0) @db.Decimal(5, 2) // 5%
+  startDate            String // YYYY-MM-DD
+  endDate              String? // YYYY-MM-DD
   auctionFrequency     String   @default("MONTHLY") // MONTHLY
   status               String   @default("UPCOMING") // UPCOMING, ACTIVE, COMPLETED, CLOSED
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
-  company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  assignedStaffId      String?
-  assignedStaff        User?    @relation("ChitGroupStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  company         Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignedStaffId String?
+  assignedStaff   User?   @relation("ChitGroupStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
 
-  members              ChitGroupMember[]
-  staffAssignments     ChitGroupStaff[]
-  schedules            InstallmentSchedule[]
-  transactions         PaymentTransaction[]
-  auctions             Auction[]
+  members          ChitGroupMember[]
+  staffAssignments ChitGroupStaff[]
+  schedules        InstallmentSchedule[]
+  transactions     PaymentTransaction[]
+  auctions         Auction[]
+  refunds          Refund[]
 
+  @@unique([companyId, groupCode])
   @@index([companyId, status])
+  @@index([assignedStaffId])
 }
 
 model ChitGroupStaff {
@@ -152,192 +161,210 @@ model ChitGroupStaff {
   staffId    String
   assignedAt DateTime @default(now())
 
-  group      ChitGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  staff      User      @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  group ChitGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  staff User      @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
   @@unique([groupId, staffId])
+  @@index([staffId])
 }
 
 model ChitGroupMember {
   id           String   @id @default(uuid())
   groupId      String
   subscriberId String
-  ticketNumber Int      // Ticket number e.g. 1 to 20
+  ticketNumber Int // Ticket number e.g. 1 to 20
   enrolledAt   DateTime @default(now())
 
-  group        ChitGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  subscriber   Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  group      ChitGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
 
   @@unique([groupId, ticketNumber])
   @@unique([groupId, subscriberId])
+  @@index([subscriberId])
 }
 
 model InstallmentSchedule {
   id              String   @id @default(uuid())
   groupId         String
   installmentNo   Int
-  dueDate         String   // YYYY-MM-DD
-  scheduledAmount Float
-  dividendAmount  Float    @default(0.0)
-  netDueAmount    Float    // scheduledAmount - dividendAmount
+  dueDate         String // YYYY-MM-DD
+  scheduledAmount Decimal  @db.Decimal(15, 2)
+  dividendAmount  Decimal  @default(0.0) @db.Decimal(15, 2)
+  netDueAmount    Decimal  @db.Decimal(15, 2) // scheduledAmount - dividendAmount
   createdAt       DateTime @default(now())
 
-  group           ChitGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group ChitGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   @@unique([groupId, installmentNo])
 }
 
 model PaymentTransaction {
-  id                  String   @id @default(uuid())
-  companyId           String
-  subscriberId        String
-  groupId             String
-  installmentNo       Int
-  amount              Float
-  paymentMode         String   // CASH, BANK_TRANSFER, UPI
-  receiptNo           String   @unique
-  externalRef         String?  // Bank / UPI Txn Reference ID
-  receiptPhoto        String?  // Photo / image of receipt proof
-  installmentType     String?  @default("REGULAR") // REGULAR, ADVANCE, BACKLOG
-  rejectionReason     String?  // Reason if rejected by manager
-  recordedByUserId    String
-  verificationStatus  String   @default("VERIFIED") // VERIFIED, PENDING_VERIFICATION, REJECTED, REVERSED
-  isReversed          Boolean  @default(false)
-  reversalReason      String?
-  idempotencyKey      String?  @unique
-  notes               String?
-  createdAt           DateTime @default(now())
+  id                 String   @id @default(uuid())
+  companyId          String
+  subscriberId       String
+  groupId            String
+  installmentNo      Int
+  amount             Decimal  @db.Decimal(15, 2)
+  paymentMode        String // CASH, BANK_TRANSFER, UPI
+  receiptNo          String
+  externalRef        String? // Bank / UPI Txn Reference ID
+  receiptPhoto       String? // Photo / image of receipt proof
+  installmentType    String?  @default("REGULAR") // REGULAR, ADVANCE, BACKLOG
+  rejectionReason    String? // Reason if rejected by manager
+  recordedByUserId   String
+  verificationStatus String   @default("VERIFIED") // VERIFIED, PENDING_VERIFICATION, REJECTED, REVERSED
+  isReversed         Boolean  @default(false)
+  reversalReason     String?
+  idempotencyKey     String?
+  notes              String?
+  createdAt          DateTime @default(now())
 
-  company             Company    @relation(fields: [companyId], references: [id])
-  subscriber          Subscriber @relation(fields: [subscriberId], references: [id])
-  group               ChitGroup  @relation(fields: [groupId], references: [id])
-  recordedBy          User       @relation("RecordedBy", fields: [recordedByUserId], references: [id])
+  company    Company    @relation(fields: [companyId], references: [id])
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id])
+  group      ChitGroup  @relation(fields: [groupId], references: [id])
+  recordedBy User       @relation("RecordedBy", fields: [recordedByUserId], references: [id])
 
-  receipt             Receipt?
+  receipt Receipt?
 
+  @@unique([companyId, receiptNo])
+  @@unique([companyId, idempotencyKey])
   @@index([companyId, createdAt])
   @@index([companyId, verificationStatus])
   @@index([subscriberId])
-  @@index([groupId])
+  @@index([groupId, installmentNo])
+  @@index([recordedByUserId, createdAt])
 }
 
 model Receipt {
   id            String   @id @default(uuid())
   transactionId String   @unique
-  receiptNo     String   @unique
+  receiptNo     String
   printedCount  Int      @default(1)
   pdfPath       String?
   createdAt     DateTime @default(now())
 
-  transaction   PaymentTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  transaction PaymentTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([receiptNo])
 }
 
 model Auction {
-  id                   String   @id @default(uuid())
-  groupId              String
-  installmentNo        Int
-  auctionDate          String   // YYYY-MM-DD
-  winningBidDiscount   Float    // Bid discount given up by winner e.g. 50000.00
-  foremanCommission    Float    // Commission kept by Foreman e.g. 25000.00 (5% of chit value)
-  totalDividend        Float    // Distributable dividend (winningBidDiscount - foremanCommission)
-  dividendPerMember    Float    // totalDividend / maxMembers
-  winnerSubscriberId   String
-  winningTicketNo      Int
-  status               String   @default("CONFIRMED") // SCHEDULED, IN_PROGRESS, CONFIRMED, CANCELLED
-  notes                String?
-  createdAt            DateTime @default(now())
+  id                 String   @id @default(uuid())
+  groupId            String
+  installmentNo      Int
+  auctionDate        String // YYYY-MM-DD
+  winningBidDiscount Decimal  @db.Decimal(15, 2) // Bid discount given up by winner e.g. 50000.00
+  foremanCommission  Decimal  @db.Decimal(15, 2) // Commission kept by Foreman e.g. 25000.00 (5% of chit value)
+  totalDividend      Decimal  @db.Decimal(15, 2) // Distributable dividend (winningBidDiscount - foremanCommission)
+  dividendPerMember  Decimal  @db.Decimal(15, 2) // totalDividend / maxMembers
+  winnerSubscriberId String
+  winningTicketNo    Int
+  status             String   @default("CONFIRMED") // SCHEDULED, IN_PROGRESS, CONFIRMED, CANCELLED
+  notes              String?
+  createdAt          DateTime @default(now())
 
-  group                ChitGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  winnerSubscriber     Subscriber @relation("AuctionWinner", fields: [winnerSubscriberId], references: [id])
-  
-  bids                 AuctionBid[]
-  payout               Payout?
+  group            ChitGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  winnerSubscriber Subscriber @relation("AuctionWinner", fields: [winnerSubscriberId], references: [id])
+
+  bids   AuctionBid[]
+  payout Payout?
 
   @@unique([groupId, installmentNo])
+  @@index([winnerSubscriberId])
 }
 
 model AuctionBid {
   id           String   @id @default(uuid())
   auctionId    String
   subscriberId String
-  bidDiscount  Float
+  bidDiscount  Decimal  @db.Decimal(15, 2)
   bidTime      DateTime @default(now())
 
-  auction      Auction    @relation(fields: [auctionId], references: [id], onDelete: Cascade)
-  subscriber   Subscriber @relation(fields: [subscriberId], references: [id])
+  auction    Auction    @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id])
+
+  @@index([auctionId])
+  @@index([subscriberId])
 }
 
 model Payout {
-  id                 String   @id @default(uuid())
-  auctionId          String   @unique
-  subscriberId       String
-  grossBidAmount     Float    // Chit Value - winningBidDiscount
-  deductions         Float    @default(0.0) // Any arrears/penalties
-  netPayoutAmount    Float    // grossBidAmount - deductions
-  paymentMode        String   @default("BANK_TRANSFER") // BANK_TRANSFER, CHEQUE, CASH
-  transactionRef     String?
-  status             String   @default("PENDING") // PENDING, APPROVED, DISBURSED, REJECTED
-  approvedByUserId   String?
-  approvedAt         DateTime?
-  disbursedAt        DateTime?
-  createdAt          DateTime @default(now())
+  id               String    @id @default(uuid())
+  auctionId        String    @unique
+  subscriberId     String
+  grossBidAmount   Decimal   @db.Decimal(15, 2) // Chit Value - winningBidDiscount
+  deductions       Decimal   @default(0.0) @db.Decimal(15, 2) // Any arrears/penalties
+  netPayoutAmount  Decimal   @db.Decimal(15, 2) // grossBidAmount - deductions
+  paymentMode      String    @default("BANK_TRANSFER") // BANK_TRANSFER, CHEQUE, CASH
+  transactionRef   String?
+  status           String    @default("PENDING") // PENDING, APPROVED, DISBURSED, REJECTED
+  approvedByUserId String?
+  approvedAt       DateTime?
+  disbursedAt      DateTime?
+  createdAt        DateTime  @default(now())
 
-  auction            Auction    @relation(fields: [auctionId], references: [id])
-  subscriber         Subscriber @relation(fields: [subscriberId], references: [id])
-  approvedBy         User?      @relation("ApprovedBy", fields: [approvedByUserId], references: [id])
+  auction    Auction    @relation(fields: [auctionId], references: [id])
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id])
+  approvedBy User?      @relation("ApprovedBy", fields: [approvedByUserId], references: [id])
+
+  @@index([subscriberId])
+  @@index([status])
+  @@index([approvedByUserId])
 }
 
 model CashHandover {
-  id                   String   @id @default(uuid())
-  companyId            String
-  staffUserId          String
-  handoverDate         String   // YYYY-MM-DD
-  expectedCash         Float
-  actualCash           Float
-  difference           Float    // actualCash - expectedCash
-  status               String   @default("SUBMITTED") // SUBMITTED, VERIFIED, DISCREPANCY
-  notes                String?
-  verifiedByUserId     String?
-  verifiedAt           DateTime?
-  createdAt            DateTime @default(now())
+  id               String    @id @default(uuid())
+  companyId        String
+  staffUserId      String
+  handoverDate     String // YYYY-MM-DD
+  expectedCash     Decimal   @db.Decimal(15, 2)
+  actualCash       Decimal   @db.Decimal(15, 2)
+  difference       Decimal   @db.Decimal(15, 2) // actualCash - expectedCash
+  status           String    @default("SUBMITTED") // SUBMITTED, VERIFIED, DISCREPANCY
+  notes            String?
+  verifiedByUserId String?
+  verifiedAt       DateTime?
+  createdAt        DateTime  @default(now())
 
-  company              Company @relation(fields: [companyId], references: [id])
-  staff                User   @relation("StaffHandover", fields: [staffUserId], references: [id])
-  verifiedBy           User?  @relation("ManagerVerification", fields: [verifiedByUserId], references: [id])
+  company    Company @relation(fields: [companyId], references: [id])
+  staff      User    @relation("StaffHandover", fields: [staffUserId], references: [id])
+  verifiedBy User?   @relation("ManagerVerification", fields: [verifiedByUserId], references: [id])
 
   @@index([companyId, handoverDate])
+  @@index([staffUserId, handoverDate])
+  @@index([verifiedByUserId])
 }
 
 model Expense {
-  id           String   @id @default(uuid())
-  companyId    String
-  category     String   // RENT, UTILITIES, SALARY, TRAVEL, MISC
-  amount       Float
-  expenseDate  String   // YYYY-MM-DD
-  description  String
-  recordedBy   String
-  createdAt    DateTime @default(now())
+  id          String   @id @default(uuid())
+  companyId   String
+  category    String // RENT, UTILITIES, SALARY, TRAVEL, MISC
+  amount      Decimal  @db.Decimal(15, 2)
+  expenseDate String // YYYY-MM-DD
+  description String
+  recordedBy  String
+  createdAt   DateTime @default(now())
 
-  company      Company  @relation(fields: [companyId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
 
   @@index([companyId, expenseDate])
 }
 
 model AuditLog {
-  id         String   @id @default(uuid())
-  companyId  String?
-  userId     String?
-  action     String
-  entity     String
-  entityId   String?
-  details    String?  // JSON formatted details
-  ipAddress  String?
-  createdAt  DateTime @default(now())
+  id        String   @id @default(uuid())
+  companyId String?
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  details   String? // JSON formatted details
+  ipAddress String?
+  createdAt DateTime @default(now())
 
-  company    Company? @relation(fields: [companyId], references: [id])
-  user       User?    @relation(fields: [userId], references: [id])
+  company Company? @relation(fields: [companyId], references: [id])
+  user    User?    @relation(fields: [userId], references: [id])
 
   @@index([companyId, createdAt])
+  @@index([userId, action])
 }
 
 model RefreshToken {
@@ -347,68 +374,81 @@ model RefreshToken {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Account {
-  id             String    @id @default(uuid())
+  id             String   @id @default(uuid())
   companyId      String
-  code           String    // e.g. "1001", "1002", "2001", "3001", "4001", "5001"
-  name           String    // e.g. "Cash on Hand", "Bank Account", "Chit Subscriptions", "Salaries"
-  type           String    // ASSET, LIABILITY, EQUITY, INCOME, EXPENSE
-  openingBalance Float     @default(0.0)
-  currentBalance Float     @default(0.0)
-  isActive       Boolean   @default(true)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  code           String // e.g. "1001", "1002", "2001", "3001", "4001", "5001"
+  name           String // e.g. "Cash on Hand", "Bank Account", "Chit Subscriptions", "Salaries"
+  type           String // ASSET, LIABILITY, EQUITY, INCOME, EXPENSE
+  openingBalance Decimal  @default(0.0) @db.Decimal(15, 2)
+  currentBalance Decimal  @default(0.0) @db.Decimal(15, 2)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  lines          JournalEntryLine[]
+  company Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lines   JournalEntryLine[]
 
   @@unique([companyId, code])
 }
 
 model JournalEntry {
-  id          String   @id @default(uuid())
-  companyId   String
-  entryNo     String   @unique
-  date        String   // YYYY-MM-DD
-  narration   String
-  isBalanced  Boolean  @default(true)
-  status      String   @default("POSTED") // DRAFT, POSTED, REVERSED
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid())
+  companyId  String
+  entryNo    String
+  date       String // YYYY-MM-DD
+  narration  String
+  isBalanced Boolean  @default(true)
+  status     String   @default("POSTED") // DRAFT, POSTED, REVERSED
+  createdAt  DateTime @default(now())
 
-  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  lines       JournalEntryLine[]
+  company Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lines   JournalEntryLine[]
+
+  @@unique([companyId, entryNo])
+  @@index([companyId, date])
 }
 
 model JournalEntryLine {
-  id             String       @id @default(uuid())
+  id             String  @id @default(uuid())
   journalEntryId String
   accountId      String
-  type           String       // DEBIT, CREDIT
-  amount         Float
+  type           String // DEBIT, CREDIT
+  amount         Decimal @db.Decimal(15, 2)
   description    String?
 
-  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
-  account        Account      @relation(fields: [accountId], references: [id])
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account      Account      @relation(fields: [accountId], references: [id])
+
+  @@index([journalEntryId])
+  @@index([accountId])
 }
 
 model Refund {
-  id                String     @id @default(uuid())
-  companyId         String
-  subscriberId      String
-  groupId           String
-  amount            Float
-  reason            String
-  status            String     @default("REQUESTED") // REQUESTED, APPROVED, DISBURSED, REJECTED
-  approvedByUserId  String?
-  approvedAt        DateTime?
-  disbursedAt       DateTime?
-  createdAt         DateTime   @default(now())
+  id               String    @id @default(uuid())
+  companyId        String
+  subscriberId     String
+  groupId          String
+  amount           Decimal   @db.Decimal(15, 2)
+  reason           String
+  status           String    @default("REQUESTED") // REQUESTED, APPROVED, DISBURSED, REJECTED
+  approvedByUserId String?
+  approvedAt       DateTime?
+  disbursedAt      DateTime?
+  createdAt        DateTime  @default(now())
 
-  company           Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  subscriber        Subscriber @relation(fields: [subscriberId], references: [id])
+  company    Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id])
+  group      ChitGroup  @relation(fields: [groupId], references: [id])
+
+  @@index([companyId, status])
+  @@index([subscriberId])
+  @@index([groupId])
 }
 
 model Notification {
@@ -417,7 +457,7 @@ model Notification {
   message        String
   type           String   @default("GENERAL_ANNOUNCEMENT")
   priority       String   @default("NORMAL")
-  targetType     String   // ALL_MANAGERS, SINGLE_MANAGER, ALL_STAFF, SINGLE_STAFF
+  targetType     String // ALL_MANAGERS, SINGLE_MANAGER, ALL_STAFF, SINGLE_STAFF
   targetId       String?
   targetName     String?
   channels       String   @default("IN_APP")
@@ -428,25 +468,31 @@ model Notification {
   senderRole     String?
   companyId      String?
   createdAt      DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([targetType, targetId])
 }
 
 model Business {
-  id               String          @id @default(uuid())
-  companyId        String?
-  managerId        String
-  name             String
-  category         String?         @default("GENERAL_STORE")
-  phone            String?
-  address          String?
-  currency         String          @default("INR")
-  status           String          @default("ACTIVE")
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
+  id        String   @id @default(uuid())
+  companyId String?
+  managerId String
+  name      String
+  category  String?  @default("GENERAL_STORE")
+  phone     String?
+  address   String?
+  currency  String   @default("INR")
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   company          Company?        @relation(fields: [companyId], references: [id], onDelete: Cascade)
   manager          User            @relation("ManagerBusinesses", fields: [managerId], references: [id], onDelete: Cascade)
   staffAssignments BusinessStaff[]
   customers        KhataCustomer[]
+
+  @@index([companyId])
+  @@index([managerId])
 }
 
 model BusinessStaff {
@@ -455,46 +501,63 @@ model BusinessStaff {
   staffId    String
   assignedAt DateTime @default(now())
 
-  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  staff      User     @relation("StaffAssignedBusinesses", fields: [staffId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  staff    User     @relation("StaffAssignedBusinesses", fields: [staffId], references: [id], onDelete: Cascade)
 
   @@unique([businessId, staffId])
+  @@index([staffId])
 }
 
 model KhataCustomer {
-  id             String             @id @default(uuid())
+  id             String   @id @default(uuid())
   businessId     String
   name           String
   phone          String?
   address        String?
-  openingBalance Float              @default(0)
-  status         String             @default("ACTIVE")
+  openingBalance Decimal  @default(0) @db.Decimal(15, 2)
+  status         String   @default("ACTIVE")
   createdById    String?
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  business       Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  createdBy      User?              @relation("CustomerCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  transactions   KhataTransaction[]
+  business     Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy    User?              @relation("CustomerCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  transactions KhataTransaction[]
 
   @@index([businessId])
+  @@index([createdById])
 }
 
 model KhataTransaction {
-  id                String        @id @default(uuid())
-  customerId        String
-  type              String        // GAVE (You Gave / Maine Diye), GOT (You Got / Mujhe Mile)
-  amount            Float
-  description       String?
-  billPhoto         String?
-  paymentMode       String        @default("CASH") // CASH, UPI, BANK_TRANSFER, CHEQUE, OTHER
-  recordedByUserId  String?
-  transactionDate   DateTime      @default(now())
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  id               String   @id @default(uuid())
+  customerId       String
+  type             String // GAVE (You Gave / Maine Diye), GOT (You Got / Mujhe Mile)
+  amount           Decimal  @db.Decimal(15, 2)
+  description      String?
+  billPhoto        String?
+  paymentMode      String   @default("CASH") // CASH, UPI, BANK_TRANSFER, CHEQUE, OTHER
+  recordedByUserId String?
+  transactionDate  DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  customer          KhataCustomer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  recordedBy        User?         @relation("KhataTxRecorder", fields: [recordedByUserId], references: [id], onDelete: SetNull)
+  customer   KhataCustomer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  recordedBy User?         @relation("KhataTxRecorder", fields: [recordedByUserId], references: [id], onDelete: SetNull)
 
   @@index([customerId, transactionDate])
+  @@index([recordedByUserId])
+}
+
+// Atomic per-company counters used to generate human-readable codes
+// (receipt numbers, subscriber codes, group codes, journal entry numbers)
+// without count()+1 race conditions.
+model CompanySequence {
+  companyId String
+  key       String
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, key])
 }

@@ -302,7 +302,7 @@ export function AuctionsPayoutsTab({ user }: { user: any }) {
                         onPress={() => setWinningSubId(m.subscriberId)}
                       >
                         <Text style={{ fontWeight: winningSubId === m.subscriberId ? '700' : '500', color: '#0F172A', fontSize: 13 }}>
-                          Ticket #{m.ticketNo}: {m.subscriber?.fullName} [{m.subscriber?.subscriberCode}]
+                          Ticket #{m.ticketNo ?? m.ticketNumber}: {m.subscriber?.fullName} [{m.subscriber?.subscriberCode}]
                         </Text>
                       </TouchableOpacity>
                     ))}

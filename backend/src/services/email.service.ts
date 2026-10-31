@@ -1,44 +1,58 @@
-import 'dotenv/config';
 import nodemailer from 'nodemailer';
+import { env } from '../config/env.js';
 
-const SMTP_USER = process.env.SMTP_USER || 'akshatrajpati@gmail.com';
-const SMTP_PASS = (process.env.SMTP_PASS || 'rxdciwgakdupujze').replace(/\s+/g, '');
-const SMTP_HOST = process.env.SMTP_HOST || (SMTP_USER.includes('gmail.com') ? 'smtp.gmail.com' : 'smtp.mail.yahoo.com');
-const SMTP_PORT = Number(process.env.SMTP_PORT) || 465;
-const SMTP_SECURE = process.env.SMTP_SECURE !== 'false';
-const SMTP_FROM = process.env.SMTP_FROM || `"ChitKart Platform" <${SMTP_USER}>`;
-const DEFAULT_PORTAL_URL = process.env.PORTAL_URL || 'https://chit-fund-mobile.vercel.app';
+/**
+ * Outbound email (OTP codes and new-account credentials).
+ *
+ * SMTP credentials come only from environment variables (SMTP_USER / SMTP_PASS / ...).
+ * When they are not configured, email is disabled: send* functions return
+ * { success: false } and nothing is logged except the fact that email is disabled.
+ * OTP codes and passwords are never written to logs.
+ */
+const DEFAULT_PORTAL_URL = env.portalUrl;
+const SMTP_FROM = env.smtp.from;
 
-export const transporter = nodemailer.createTransport({
-  service: SMTP_USER.includes('gmail.com') ? 'gmail' : undefined,
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: SMTP_SECURE,
-  auth: {
-    user: SMTP_USER,
-    pass: SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false,
-  },
-  connectionTimeout: 15000,
-});
+export const transporter = env.smtp.enabled
+  ? nodemailer.createTransport({
+      host: env.smtp.host || undefined,
+      service: !env.smtp.host && env.smtp.user.endsWith('@gmail.com') ? 'gmail' : undefined,
+      port: env.smtp.port,
+      secure: env.smtp.secure,
+      auth: { user: env.smtp.user, pass: env.smtp.pass },
+      connectionTimeout: 15000,
+    })
+  : null;
 
-// Verify email configuration on startup (non-blocking)
-transporter.verify((error) => {
-  if (error) {
-    console.warn(`[EmailService] Notice: SMTP (${SMTP_USER}) status:`, error.message);
-  } else {
-    console.log(`[EmailService] Nodemailer successfully connected to Mail Service (${SMTP_USER})`);
+if (!transporter) {
+  if (!env.isTest) console.warn('[EmailService] SMTP is not configured (SMTP_USER/SMTP_PASS); outbound email is disabled.');
+} else if (!env.isTest) {
+  // Verify email configuration on startup (non-blocking)
+  transporter.verify((error) => {
+    if (error) console.warn('[EmailService] SMTP connection check failed:', error.message);
+    else console.log('[EmailService] SMTP connection verified.');
+  });
+}
+
+type MailOptions = Parameters<ReturnType<typeof nodemailer.createTransport>['sendMail']>[0];
+
+async function deliver(mailOptions: MailOptions, kind: string) {
+  if (!transporter) return { success: false as const, error: 'Email delivery is not configured' };
+  try {
+    const result = await transporter.sendMail(mailOptions);
+    console.log(`[EmailService] ${kind} email sent (MessageId: ${result.messageId})`);
+    return { success: true as const, messageId: result.messageId as string };
+  } catch (error: any) {
+    console.error(`[EmailService] ${kind} email failed:`, error?.message);
+    return { success: false as const, error: 'Email delivery failed' };
   }
-});
+}
 
 /**
  * Send a 6-digit OTP email for password reset or verification
  */
 export async function sendOtpEmail(to: string, otp: string, fullName: string = 'User') {
   const mailOptions = {
-    from: `"ChitKart Security" <${SMTP_FROM}>`,
+    from: SMTP_FROM,
     to,
     subject: 'Your Password Reset OTP - ChitKart',
     text: `Hello ${fullName},\n\nYour One-Time Password (OTP) for password reset on ChitKart is: ${otp}\n\nThis OTP is valid for 10 minutes. Please do not share this code with anyone.\n\nRegards,\nChitKart Security Team`,
@@ -94,17 +108,7 @@ export async function sendOtpEmail(to: string, otp: string, fullName: string = '
     `,
   };
 
-  try {
-    const result = await transporter.sendMail(mailOptions);
-    console.log(`[EmailService] ChitKart OTP email sent successfully to ${to} (MessageId: ${result.messageId})`);
-    return { success: true, messageId: result.messageId };
-  } catch (error: any) {
-    console.error(`[EmailService] SMTP error sending to ${to}:`, error.message);
-    console.log(`=========================================`);
-    console.log(`[EmailService] BACKUP OTP CODE: [ ${otp} ]`);
-    console.log(`=========================================`);
-    return { success: false, error: error.message };
-  }
+  return deliver(mailOptions, 'OTP');
 }
 
 export interface AdminCredentialsEmailParams {
@@ -136,7 +140,7 @@ export async function sendAdminCredentialsEmail(params: AdminCredentialsEmailPar
   const displayCompany = companyCode ? `${companyName} (${companyCode})` : companyName;
 
   const mailOptions = {
-    from: `"ChitKart Administration" <${SMTP_FROM}>`,
+    from: SMTP_FROM,
     to: to.trim(),
     subject: `🎯 Your ChitKart Login Credentials - ${displayCompany}`,
     text: `Hello ${fullName},\n\nYour account credentials have been generated on the ChitKart Platform by the Super Administrator.\n\nOrganization: ${displayCompany}\nRole: ${role}\nUsername: ${username}\nPassword: ${password}\nLogin Portal: ${loginUrl}\n\nPlease sign in and update your temporary password upon first access.\n\nRegards,\nChitKart Platform Administration`,
@@ -255,18 +259,7 @@ export async function sendAdminCredentialsEmail(params: AdminCredentialsEmailPar
     `,
   };
 
-  try {
-    const result = await transporter.sendMail(mailOptions);
-    console.log(`[EmailService] Admin credentials successfully emailed to ${to} (MessageId: ${result.messageId})`);
-    return { success: true, messageId: result.messageId };
-  } catch (error: any) {
-    console.error(`[EmailService] Error emailing credentials to ${to}:`, error.message);
-    console.log(`=======================================================`);
-    console.log(`[EmailService] BACKUP CREDENTIALS FOR ${to}:`);
-    console.log(`Username: ${username} | Password: ${password}`);
-    console.log(`=======================================================`);
-    return { success: false, error: error.message };
-  }
+  return deliver(mailOptions, 'Account credentials');
 }
 
 

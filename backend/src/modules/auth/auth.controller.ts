@@ -4,17 +4,78 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { sendError } from '../../lib/http.js';
+import { env } from '../../config/env.js';
+import { ROLES } from '../../middleware/auth.js';
+import { isSuperAdmin, loadUserForTenant } from '../../security/tenant.js';
 import { sendOtpEmail, sendAdminCredentialsEmail } from '../../services/email.service.js';
 
-// In-memory OTP storage with TTL (FR-AUTH-006)
-interface OtpEntry {
-  otp: string;
-  expiresAt: number;
-  userId: string;
-  email: string;
-  attempts: number;
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const BCRYPT_ROUNDS = 10;
+
+/**
+ * OTPs are never stored or logged in plain text. The PASSWORD_RESET_OTP audit
+ * record holds only an HMAC of the code (keyed with the server secret, so the
+ * 6-digit space cannot be brute-forced offline from a database/audit-log read),
+ * the expiry and the failed-attempt counter.
+ */
+const hashOtp = (userId: string, otp: string) =>
+  crypto.createHmac('sha256', env.refreshTokenSecret).update(`${userId}:${otp}`).digest('hex');
+
+const timingSafeEqualHex = (a: string, b: string) => {
+  const ab = Buffer.from(a, 'hex');
+  const bb = Buffer.from(b, 'hex');
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
+};
+
+const signAccessToken = (user: { id: string; role: string; companyId: string | null }, sessionId: string) =>
+  jwt.sign({ userId: user.id, sessionId, role: user.role, companyId: user.companyId }, env.jwtSecret, {
+    algorithm: 'HS256',
+    expiresIn: env.jwtExpiresIn as jwt.SignOptions['expiresIn'],
+  });
+
+const findUserByIdentifier = (identifier: string) =>
+  prisma.user.findFirst({
+    where: {
+      OR: [
+        { username: { equals: identifier, mode: 'insensitive' } },
+        { email: { equals: identifier, mode: 'insensitive' } },
+        { phone: identifier },
+      ],
+    },
+  });
+
+/** Look up the active OTP record and enforce expiry + attempt limits. */
+async function checkOtp(userId: string, otp: string): Promise<{ ok: true; recordId: string } | { ok: false; message: string }> {
+  const record = await prisma.auditLog.findFirst({
+    where: { userId, action: 'PASSWORD_RESET_OTP' },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!record) return { ok: false, message: 'No active OTP found. Please request a new code.' };
+
+  let details: { otpHash?: string; expiresAt?: number; attempts?: number } = {};
+  try {
+    details = JSON.parse(record.details || '{}');
+  } catch {
+    details = {};
+  }
+  if (!details.otpHash || !details.expiresAt || Date.now() > details.expiresAt) {
+    return { ok: false, message: 'OTP has expired. Please click Resend Code.' };
+  }
+  const attempts = details.attempts || 0;
+  if (attempts >= OTP_MAX_ATTEMPTS) {
+    return { ok: false, message: 'Too many incorrect attempts. Please request a new code.' };
+  }
+  if (!/^\d{6}$/.test(otp) || !timingSafeEqualHex(details.otpHash, hashOtp(userId, otp))) {
+    await prisma.auditLog.update({
+      where: { id: record.id },
+      data: { details: JSON.stringify({ ...details, attempts: attempts + 1 }) },
+    });
+    return { ok: false, message: 'Invalid OTP code. Please check your email or click Resend Code.' };
+  }
+  return { ok: true, recordId: record.id };
 }
-const otpStore = new Map<string, OtpEntry>();
 
 // Rate Limiting & Failed Login Lockout Tracker (FR-AUTH-008)
 interface FailedAttempt {
@@ -26,6 +87,9 @@ const failedLogins = new Map<string, FailedAttempt>();
 // Helper to sanitize key
 const normalizeKey = (key: string) => key.trim().toLowerCase();
 
+// bcrypt hash of a random string, used to equalise timing for unknown usernames.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), BCRYPT_ROUNDS);
+
 /**
  * Enforce Password Policy (FR-AUTH-008, FR-AUTH-015)
  * - Minimum 8 characters
@@ -34,6 +98,11 @@ const normalizeKey = (key: string) => key.trim().toLowerCase();
  * - At least one number (0-9)
  * - At least one special character (!@#$%^&*...)
  */
+const withoutPasswordHash = <T extends { passwordHash?: string }>(u: T): Omit<T, 'passwordHash'> => {
+  const { passwordHash: _omit, ...rest } = u;
+  return rest;
+};
+
 export const validatePasswordPolicy = (password: string): { valid: boolean; message?: string } => {
   if (!password || password.length < 8) {
     return { valid: false, message: 'Password must be at least 8 characters long.' };
@@ -47,7 +116,7 @@ export const validatePasswordPolicy = (password: string): { valid: boolean; mess
   if (!/[0-9]/.test(password)) {
     return { valid: false, message: 'Password must contain at least one number (0-9).' };
   }
-  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?`~]/.test(password)) {
+  if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(password)) {
     return { valid: false, message: 'Password must contain at least one special character (!@#$%^&*...).' };
   }
   return { valid: true };
@@ -122,37 +191,14 @@ export const login = async (req: AuthRequest, res: Response) => {
     };
 
     if (!user) {
+      // Spend comparable time to a real check so response timing does not reveal valid usernames.
+      await bcrypt.compare(String(password), DUMMY_PASSWORD_HASH);
       await recordFailedAttempt();
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    let isMatch = await bcrypt.compare(password, user.passwordHash);
-
-    // Universal recovery fallback (guarantees any role: SUPER_ADMIN, MANAGER, COLLECTION_STAFF can log in)
-    if (!isMatch) {
-      const universalFallbacks = [
-        'admin123',
-        'Admin@123',
-        'Akshyat@2026!',
-        'NewPassword@2026!',
-        'Manager@123',
-        'Staff@123',
-        'Chitkart@2026!',
-        'Password@123',
-      ];
-      if (universalFallbacks.includes(password)) {
-        isMatch = true;
-        // Auto-heal the database hash to the provided password
-        try {
-          const freshHash = await bcrypt.hash(password, 10);
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { passwordHash: freshHash },
-          });
-          console.log(`[Auth] Auto-healed password hash in database for ${user.role} (${user.username})`);
-        } catch (e) {}
-      }
-    }
+    // Only the stored bcrypt hash is accepted (the former hard-coded "universal" passwords were removed).
+    const isMatch = await bcrypt.compare(String(password), user.passwordHash);
 
     if (!isMatch) {
       await recordFailedAttempt();
@@ -189,16 +235,13 @@ export const login = async (req: AuthRequest, res: Response) => {
 
     const sessionId = crypto.randomUUID();
 
-    const secret = process.env.JWT_SECRET || 'chitfund_super_secure_jwt_secret_key_2026!@#';
-    const refreshSecret = process.env.REFRESH_TOKEN_SECRET || 'chitfund_refresh_token_secret_key_2026!$%';
+    const accessToken = signAccessToken(user, sessionId);
 
-    const accessToken = jwt.sign(
-      { userId: user.id, sessionId, role: user.role, companyId: user.companyId },
-      secret,
-      { expiresIn: '1d' }
-    );
-
-    const refreshToken = jwt.sign({ userId: user.id, sessionId }, refreshSecret, { expiresIn: '7d' });
+    const refreshToken = jwt.sign({ userId: user.id, sessionId }, env.refreshTokenSecret, {
+      algorithm: 'HS256',
+      expiresIn: env.refreshTokenExpiresIn as jwt.SignOptions['expiresIn'],
+    });
+    const refreshExp = (jwt.decode(refreshToken) as jwt.JwtPayload).exp!;
 
     // Store active session token in DB with sessionId
     await prisma.refreshToken.create({
@@ -206,7 +249,7 @@ export const login = async (req: AuthRequest, res: Response) => {
         id: sessionId,
         userId: user.id,
         token: refreshToken,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        expiresAt: new Date(refreshExp * 1000),
       },
     });
 
@@ -257,7 +300,7 @@ export const login = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -307,7 +350,7 @@ export const logout = async (req: AuthRequest, res: Response) => {
       message: 'Logged out successfully.',
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -323,10 +366,13 @@ export const refreshToken = async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, message: 'Refresh token is required' });
     }
 
-    const refreshSecret = process.env.REFRESH_TOKEN_SECRET || 'chitfund_refresh_token_secret_key_2026!$%';
-    let decoded: any;
+    if (typeof token !== 'string') {
+      return res.status(400).json({ success: false, message: 'Refresh token must be a string' });
+    }
+
+    let decoded: jwt.JwtPayload;
     try {
-      decoded = jwt.verify(token, refreshSecret);
+      decoded = jwt.verify(token, env.refreshTokenSecret, { algorithms: ['HS256'] }) as jwt.JwtPayload;
     } catch (e) {
       return res.status(403).json({ success: false, message: 'Invalid or expired refresh token' });
     }
@@ -337,7 +383,7 @@ export const refreshToken = async (req: Request, res: Response) => {
       include: { user: true },
     });
 
-    if (!storedToken || storedToken.expiresAt < new Date()) {
+    if (!storedToken || storedToken.expiresAt < new Date() || storedToken.userId !== decoded.userId) {
       if (storedToken) {
         await prisma.refreshToken.delete({ where: { token } });
       }
@@ -349,32 +395,15 @@ export const refreshToken = async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, message: 'User account is no longer active.' });
     }
 
-    const secret = process.env.JWT_SECRET || 'chitfund_super_secure_jwt_secret_key_2026!@#';
-    const newAccessToken = jwt.sign(
-      {
-        userId: storedToken.user.id,
-        sessionId: storedToken.id,
-        role: storedToken.user.role,
-        companyId: storedToken.user.companyId,
-      },
-      secret,
-      { expiresIn: '1d' }
-    );
+    const newAccessToken = signAccessToken(storedToken.user, storedToken.id);
 
-    const isProd = process.env.NODE_ENV === 'production';
-    res.cookie('token', newAccessToken, {
-      httpOnly: true,
-      secure: isProd,
-      sameSite: isProd ? 'none' : 'lax',
-      maxAge: 24 * 60 * 60 * 1000,
-    });
-
+    // The API authenticates with the Authorization header only; no auth cookie is set.
     return res.json({
       success: true,
       data: { accessToken: newAccessToken },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -420,7 +449,7 @@ export const me = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -497,7 +526,7 @@ export const updateProfile = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -524,27 +553,12 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    let isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
-    if (!isMatch) {
-      const universalFallbacks = [
-        'admin123',
-        'Admin@123',
-        'Akshyat@2026!',
-        'NewPassword@2026!',
-        'Manager@123',
-        'Staff@123',
-        'Chitkart@2026!',
-        'Password@123',
-      ];
-      if (universalFallbacks.includes(currentPassword)) {
-        isMatch = true;
-      }
-    }
+    const isMatch = await bcrypt.compare(String(currentPassword), user.passwordHash);
     if (!isMatch) {
       return res.status(401).json({ success: false, message: 'Current password is incorrect' });
     }
 
-    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await prisma.user.update({
       where: { id: user.id },
       data: { passwordHash },
@@ -574,202 +588,87 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
       message: 'Password changed successfully. All other active sessions have been terminated.',
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 /**
- * FR-AUTH-006: Forgot Password - Generate OTP, persist in DB & send via Yahoo SMTP
+ * FR-AUTH-006: Forgot Password - generate OTP, store only its HMAC, send by email.
+ *
+ * The response is identical whether or not the account exists (no user enumeration)
+ * and never contains the OTP, even when email delivery fails.
  */
+const GENERIC_OTP_MESSAGE =
+  'If an account with a registered email matches, a 6-digit verification code has been sent to it.';
+
 export const forgotPassword = async (req: Request, res: Response) => {
   try {
-    const { emailOrUsername } = req.body;
+    const { emailOrUsername } = req.body || {};
 
-    if (!emailOrUsername || typeof emailOrUsername !== 'string') {
+    if (!emailOrUsername || typeof emailOrUsername !== 'string' || emailOrUsername.length > 200) {
       return res.status(400).json({ success: false, message: 'Email or username is required' });
     }
 
     const trimmed = emailOrUsername.trim();
+    const user = await findUserByIdentifier(trimmed);
 
-    // Case-insensitive lookup matching username, email, or phone
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { username: { equals: trimmed, mode: 'insensitive' } },
-          { email: { equals: trimmed, mode: 'insensitive' } },
-          { phone: trimmed },
-        ],
+    if (!user || user.status !== 'ACTIVE' || !user.email || !user.email.includes('@')) {
+      return res.json({ success: true, message: GENERIC_OTP_MESSAGE });
+    }
+
+    const otp = crypto.randomInt(100000, 1000000).toString();
+    const expiresAt = Date.now() + OTP_TTL_MS;
+
+    // Invalidate any previous OTP records for this user, then store the new hashed one.
+    await prisma.auditLog.deleteMany({ where: { userId: user.id, action: 'PASSWORD_RESET_OTP' } });
+    await prisma.auditLog.create({
+      data: {
+        companyId: user.companyId,
+        userId: user.id,
+        action: 'PASSWORD_RESET_OTP',
+        entity: 'OTP',
+        entityId: null,
+        details: JSON.stringify({ otpHash: hashOtp(user.id, otp), expiresAt, attempts: 0 }),
+        ipAddress: req.ip || 'unknown',
       },
     });
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'No user account found matching this email or username.',
-      });
+    const emailRes = await sendOtpEmail(user.email, otp, user.fullName || user.username);
+    if (!emailRes.success) {
+      console.warn(`[ForgotPassword] OTP email could not be delivered for user ${user.id}.`);
     }
 
-    let recipientEmail = user.email;
-    if (!recipientEmail) {
-      if (trimmed.includes('@')) {
-        recipientEmail = trimmed;
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { email: trimmed },
-        });
-      } else {
-        recipientEmail = 'akshatrajpati@gmail.com';
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { email: recipientEmail },
-        });
-      }
-    }
-
-    // Generate fresh 6-digit numeric OTP code
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-    const storeEntry: OtpEntry = {
-      otp,
-      expiresAt,
-      userId: user.id,
-      email: recipientEmail,
-      attempts: 0,
-    };
-
-    // 1. Store in memory map
-    otpStore.set(normalizeKey(user.username), storeEntry);
-    otpStore.set(normalizeKey(recipientEmail), storeEntry);
-    otpStore.set(normalizeKey(user.phone), storeEntry);
-    otpStore.set(normalizeKey(trimmed), storeEntry);
-
-    // 2. Persist in database AuditLog table so any serverless container or restarted process has access
-    try {
-      // Invalidate any previous OTP records for this user
-      await prisma.auditLog.deleteMany({
-        where: {
-          userId: user.id,
-          action: 'PASSWORD_RESET_OTP',
-        },
-      });
-
-      await prisma.auditLog.create({
-        data: {
-          userId: user.id,
-          action: 'PASSWORD_RESET_OTP',
-          entity: 'OTP',
-          entityId: otp, // The exact 6-digit code
-          details: JSON.stringify({
-            otp,
-            expiresAt,
-            username: user.username,
-            email: recipientEmail,
-            attempts: 0,
-          }),
-          ipAddress: req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown',
-        },
-      });
-    } catch (dbErr: any) {
-      console.warn('[ForgotPassword] DB persist notice:', dbErr.message);
-    }
-
-    // 3. Dispatch OTP via Yahoo Mail SMTP immediately
-    const emailRes = await sendOtpEmail(recipientEmail, otp, user.fullName || user.username);
-
-    const emailParts = recipientEmail.split('@');
-    const maskedName = emailParts[0].length > 2 
-      ? `${emailParts[0].slice(0, 2)}***${emailParts[0].slice(-1)}` 
-      : `${emailParts[0]}***`;
-    const maskedEmail = `${maskedName}@${emailParts[1]}`;
-
-    return res.json({
-      success: true,
-      message: emailRes.success
-        ? `A 6-digit verification code has been sent to ${maskedEmail}`
-        : `OTP generated for ${maskedEmail}. Code: ${otp}`,
-      maskedEmail,
-      otp: emailRes.success ? undefined : otp,
-    });
+    return res.json({ success: true, message: GENERIC_OTP_MESSAGE });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: 'Failed to send OTP: ' + err.message });
+    return sendError(res, err);
   }
 };
 
 /**
- * FR-AUTH-006: Verify OTP
+ * FR-AUTH-006: Verify OTP (max 5 attempts per code)
  */
 export const verifyOtp = async (req: Request, res: Response) => {
   try {
-    const { emailOrUsername, otp } = req.body;
+    const { emailOrUsername, otp } = req.body || {};
 
-    if (!emailOrUsername || !otp) {
+    if (!emailOrUsername || !otp || typeof emailOrUsername !== 'string') {
       return res.status(400).json({ success: false, message: 'Identifier and OTP are required' });
     }
 
-    const trimmed = emailOrUsername.toString().trim();
-    const cleanOtp = otp.toString().replace(/[^0-9]/g, '').trim();
-
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { username: { equals: trimmed, mode: 'insensitive' } },
-          { email: { equals: trimmed, mode: 'insensitive' } },
-          { phone: trimmed },
-        ],
-      },
-    });
-
+    const cleanOtp = String(otp).replace(/[^0-9]/g, '');
+    const user = await findUserByIdentifier(emailOrUsername.trim());
     if (!user) {
-      return res.status(404).json({ success: false, message: 'No user account found.' });
-    }
-
-    // Check memory first
-    let storedOtp = '';
-    let expiresAt = 0;
-    const memEntry = otpStore.get(normalizeKey(user.username)) || 
-                     (user.email ? otpStore.get(normalizeKey(user.email)) : undefined) ||
-                     otpStore.get(normalizeKey(trimmed));
-    if (memEntry) {
-      storedOtp = memEntry.otp;
-      expiresAt = memEntry.expiresAt;
-    } else {
-      // Check database AuditLog table
-      const dbRecord = await prisma.auditLog.findFirst({
-        where: {
-          userId: user.id,
-          action: 'PASSWORD_RESET_OTP',
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      if (dbRecord) {
-        storedOtp = dbRecord.entityId || '';
-        try {
-          const parsed = JSON.parse(dbRecord.details || '{}');
-          if (parsed.otp) storedOtp = parsed.otp;
-          if (parsed.expiresAt) expiresAt = parsed.expiresAt;
-        } catch (e) {}
-      }
-    }
-
-    if (!storedOtp) {
       return res.status(400).json({ success: false, message: 'No active OTP found. Please request a new code.' });
     }
 
-    if (expiresAt > 0 && Date.now() > expiresAt) {
-      return res.status(400).json({ success: false, message: 'OTP has expired. Please click Resend Code.' });
+    const result = await checkOtp(user.id, cleanOtp);
+    if (!result.ok) {
+      return res.status(400).json({ success: false, message: result.message });
     }
 
-    if (storedOtp !== cleanOtp) {
-      return res.status(400).json({ success: false, message: 'Invalid OTP code. Please check your email or click Resend Code.' });
-    }
-
-    return res.json({
-      success: true,
-      message: 'OTP verified successfully.',
-    });
+    return res.json({ success: true, message: 'OTP verified successfully.' });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -778,9 +677,9 @@ export const verifyOtp = async (req: Request, res: Response) => {
  */
 export const resetPassword = async (req: Request, res: Response) => {
   try {
-    const { emailOrUsername, otp, newPassword } = req.body;
+    const { emailOrUsername, otp, newPassword } = req.body || {};
 
-    if (!emailOrUsername || !otp || !newPassword) {
+    if (!emailOrUsername || !otp || !newPassword || typeof emailOrUsername !== 'string' || typeof newPassword !== 'string') {
       return res.status(400).json({
         success: false,
         message: 'Identifier, OTP, and new password are required',
@@ -793,120 +692,42 @@ export const resetPassword = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: policyCheck.message });
     }
 
-    const trimmed = emailOrUsername.toString().trim();
-    const cleanOtp = otp.toString().replace(/[^0-9]/g, '').trim();
-
-    // Case-insensitive user lookup
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { username: { equals: trimmed, mode: 'insensitive' } },
-          { email: { equals: trimmed, mode: 'insensitive' } },
-          { phone: trimmed },
-        ],
-      },
-    });
-
+    const cleanOtp = String(otp).replace(/[^0-9]/g, '');
+    const user = await findUserByIdentifier(emailOrUsername.trim());
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'No user account found matching this email or username.',
-      });
+      return res.status(400).json({ success: false, message: 'No active OTP requested or it has expired. Please click Resend Code.' });
     }
 
-    // Retrieve active OTP from memory cache or PostgreSQL database
-    let storedOtp = '';
-    let expiresAt = 0;
-    const memEntry = otpStore.get(normalizeKey(user.username)) || 
-                     (user.email ? otpStore.get(normalizeKey(user.email)) : undefined) ||
-                     otpStore.get(normalizeKey(trimmed));
-    if (memEntry) {
-      storedOtp = memEntry.otp;
-      expiresAt = memEntry.expiresAt;
-    } else {
-      const dbRecord = await prisma.auditLog.findFirst({
-        where: {
-          userId: user.id,
-          action: 'PASSWORD_RESET_OTP',
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      if (dbRecord) {
-        storedOtp = dbRecord.entityId || '';
-        try {
-          const parsed = JSON.parse(dbRecord.details || '{}');
-          if (parsed.otp) storedOtp = parsed.otp;
-          if (parsed.expiresAt) expiresAt = parsed.expiresAt;
-        } catch (e) {}
-      }
+    const result = await checkOtp(user.id, cleanOtp);
+    if (!result.ok) {
+      return res.status(400).json({ success: false, message: result.message });
     }
 
-    if (!storedOtp) {
-      return res.status(400).json({
-        success: false,
-        message: 'No active OTP requested or it has expired. Please click Resend Code.',
-      });
-    }
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
 
-    if (expiresAt > 0 && Date.now() > expiresAt) {
-      return res.status(400).json({ success: false, message: 'OTP has expired. Please click Resend Code.' });
-    }
-
-    if (storedOtp !== cleanOtp) {
-      return res.status(400).json({ success: false, message: 'Invalid OTP code. Please check your email or click Resend Code.' });
-    }
-
-    // Hash password with bcrypt and directly update database
-    const passwordHash = await bcrypt.hash(newPassword, 10);
-
-    const updatedUser = await prisma.user.update({
-      where: { id: user.id },
-      data: { passwordHash },
-    });
-
-    // Invalidate and delete the consumed OTP from DB and memory
-    try {
-      await prisma.auditLog.deleteMany({
-        where: {
-          userId: updatedUser.id,
-          action: 'PASSWORD_RESET_OTP',
-        },
-      });
-    } catch (e) {}
-
-    otpStore.delete(normalizeKey(updatedUser.username));
-    if (updatedUser.email) {
-      otpStore.delete(normalizeKey(updatedUser.email));
-    }
-    otpStore.delete(normalizeKey(trimmed));
-
-    // FR-AUTH-013: Invalidate all existing sessions / refresh tokens
-    await prisma.refreshToken.deleteMany({
-      where: { userId: updatedUser.id },
-    });
-
-    // Audit log (FR-AUTH-012)
-    try {
-      await prisma.auditLog.create({
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { passwordHash } }),
+      // Consume the OTP and invalidate all existing sessions (FR-AUTH-013)
+      prisma.auditLog.deleteMany({ where: { userId: user.id, action: 'PASSWORD_RESET_OTP' } }),
+      prisma.refreshToken.deleteMany({ where: { userId: user.id } }),
+      prisma.auditLog.create({
         data: {
-          companyId: updatedUser.companyId || null,
-          userId: updatedUser.id,
+          companyId: user.companyId || null,
+          userId: user.id,
           action: 'PASSWORD_RESET',
           entity: 'User',
-          entityId: updatedUser.id,
-          ipAddress: req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown',
+          entityId: user.id,
+          ipAddress: req.ip || 'unknown',
         },
-      });
-    } catch (e) {}
-
-    console.log(`[ResetPassword] Successfully updated password in database for user ${updatedUser.username} (${updatedUser.email})`);
+      }),
+    ]);
 
     return res.json({
       success: true,
       message: 'Password reset successful! Your password has been updated in the database. Please log in.',
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: 'Failed to reset password: ' + err.message });
+    return sendError(res, err);
   }
 };
 
@@ -915,12 +736,14 @@ export const resetPassword = async (req: Request, res: Response) => {
  */
 export const listUsers = async (req: AuthRequest, res: Response) => {
   try {
-    const isSuperAdmin = req.user?.role === 'SUPER_ADMIN';
+    const callerIsSuperAdmin = isSuperAdmin(req);
     const { role, companyId, search } = req.query;
     const whereClause: any = {};
 
-    if (!isSuperAdmin) {
-      if (req.user?.companyId) whereClause.companyId = req.user.companyId;
+    if (!callerIsSuperAdmin) {
+      // Company users only ever see their own company's accounts (never super admins).
+      whereClause.companyId = req.user!.companyId;
+      whereClause.role = { not: 'SUPER_ADMIN' };
     } else {
       if (companyId && typeof companyId === 'string' && companyId !== 'ALL') {
         whereClause.companyId = companyId;
@@ -928,11 +751,11 @@ export const listUsers = async (req: AuthRequest, res: Response) => {
     }
 
     if (role && typeof role === 'string' && role !== 'ALL') {
-      whereClause.role = role;
+      whereClause.role = callerIsSuperAdmin || role !== 'SUPER_ADMIN' ? role : '__none__';
     }
 
     if (search && typeof search === 'string' && search.trim()) {
-      const q = search.trim();
+      const q = search.trim().slice(0, 100);
       whereClause.OR = [
         { fullName: { contains: q, mode: 'insensitive' } },
         { username: { contains: q, mode: 'insensitive' } },
@@ -963,9 +786,15 @@ export const listUsers = async (req: AuthRequest, res: Response) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    return res.json({ success: true, data: users });
+    // Collection staff may look up colleagues but not their identity documents.
+    const data =
+      req.user?.role === 'COLLECTION_STAFF'
+        ? users.map(({ aadhaarNo, panNo, address, emergencyContact, dateOfBirth, ...rest }) => rest)
+        : users;
+
+    return res.json({ success: true, data });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -992,6 +821,12 @@ export const createUser = async (req: AuthRequest, res: Response) => {
     if (!username || !fullName || !phone || !password || !role) {
       return res.status(400).json({ success: false, message: 'Missing required user fields' });
     }
+    if (![username, fullName, phone, password, role].every((v) => typeof v === 'string')) {
+      return res.status(400).json({ success: false, message: 'Invalid user fields' });
+    }
+    if (!(ROLES as readonly string[]).includes(role)) {
+      return res.status(400).json({ success: false, message: `Invalid role. Must be one of: ${ROLES.join(', ')}` });
+    }
 
     // FR-AUTH-014: Prevent unauthorized role escalation
     const creatorRole = req.user?.role;
@@ -999,6 +834,24 @@ export const createUser = async (req: AuthRequest, res: Response) => {
       if (role === 'SUPER_ADMIN') {
         return res.status(403).json({ success: false, message: 'Only Super Administrators can create Super Admin accounts.' });
       }
+    }
+
+    // Tenant: company users can only create accounts inside their own company;
+    // super admins must name an existing company for company roles.
+    let targetCompanyId: string | null;
+    if (creatorRole === 'SUPER_ADMIN') {
+      targetCompanyId = role === 'SUPER_ADMIN' ? null : typeof companyId === 'string' && companyId ? companyId : null;
+      if (role !== 'SUPER_ADMIN') {
+        if (!targetCompanyId) {
+          return res.status(400).json({ success: false, message: 'companyId is required for company users' });
+        }
+        const company = await prisma.company.findUnique({ where: { id: targetCompanyId }, select: { id: true } });
+        if (!company) {
+          return res.status(404).json({ success: false, message: 'Company not found' });
+        }
+      }
+    } else {
+      targetCompanyId = req.user!.companyId || null;
     }
 
     const policy = validatePasswordPolicy(password);
@@ -1023,7 +876,7 @@ export const createUser = async (req: AuthRequest, res: Response) => {
       return res.status(409).json({ success: false, message: 'Username, phone number, or email already registered' });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const newUser = await prisma.user.create({
       data: {
         username: username.trim(),
@@ -1032,7 +885,7 @@ export const createUser = async (req: AuthRequest, res: Response) => {
         email: trimmedEmail,
         passwordHash,
         role,
-        companyId: companyId || req.user?.companyId || null,
+        companyId: targetCompanyId,
         status: 'ACTIVE',
         aadhaarNo: aadhaarNo ? String(aadhaarNo).trim() : null,
         panNo: panNo ? String(panNo).trim().toUpperCase() : null,
@@ -1075,7 +928,7 @@ export const createUser = async (req: AuthRequest, res: Response) => {
           role: roleTitle,
           companyName: companyName || 'ChitKart Platform',
           companyCode: companyCode,
-          loginUrl: process.env.PORTAL_URL || 'https://chit-fund-mobile.vercel.app',
+          loginUrl: env.portalUrl,
         });
         credentialsEmailSent = !!emailResult.success;
         if (!emailResult.success) {
@@ -1132,7 +985,7 @@ export const createUser = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1153,10 +1006,8 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: 'You cannot alter your own account status.' });
     }
 
-    const targetUser = await prisma.user.findUnique({ where: { id } });
-    if (!targetUser) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
+    // Tenant isolation: managers can only manage users of their own company.
+    const targetUser = await loadUserForTenant(req, id);
 
     // Role Escalation check
     if (targetUser.role === 'SUPER_ADMIN' && req.user?.role !== 'SUPER_ADMIN') {
@@ -1196,7 +1047,7 @@ export const updateUserStatus = async (req: AuthRequest, res: Response) => {
       data: { id: updated.id, status: updated.status },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1207,10 +1058,8 @@ export const revokeUserSessions = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
 
-    const targetUser = await prisma.user.findUnique({ where: { id } });
-    if (!targetUser) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
+    // Tenant isolation: managers can only manage users of their own company.
+    const targetUser = await loadUserForTenant(req, id);
 
     const deleted = await prisma.refreshToken.deleteMany({
       where: { userId: id },
@@ -1236,7 +1085,7 @@ export const revokeUserSessions = async (req: AuthRequest, res: Response) => {
       message: `Terminated ${deleted.count} active session(s) for user ${targetUser.username}.`,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1265,10 +1114,8 @@ export const updateUser = async (req: AuthRequest, res: Response) => {
       dateOfBirth,
     } = req.body;
 
-    const targetUser = await prisma.user.findUnique({ where: { id } });
-    if (!targetUser) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
+    // Tenant isolation: managers can only manage users of their own company.
+    const targetUser = await loadUserForTenant(req, id);
 
     // Role escalation check
     if (req.user?.role !== 'SUPER_ADMIN') {
@@ -1310,22 +1157,42 @@ export const updateUser = async (req: AuthRequest, res: Response) => {
     if (username) updateData.username = username.trim();
     if (phone) updateData.phone = phone.trim();
     if (email !== undefined) updateData.email = email ? email.trim() : null;
-    if (role) updateData.role = role;
-    if (status) updateData.status = status;
-    if (companyId !== undefined) updateData.companyId = companyId || null;
+    if (role) {
+      if (!(ROLES as readonly string[]).includes(role)) {
+        return res.status(400).json({ success: false, message: `Invalid role. Must be one of: ${ROLES.join(', ')}` });
+      }
+      updateData.role = role;
+    }
+    if (status) {
+      if (!['ACTIVE', 'SUSPENDED', 'DEACTIVATED', 'INACTIVE'].includes(status)) {
+        return res.status(400).json({ success: false, message: 'Invalid status.' });
+      }
+      if (req.user?.id === id && status !== targetUser.status) {
+        return res.status(400).json({ success: false, message: 'You cannot alter your own account status.' });
+      }
+      updateData.status = status;
+    }
+    // Only a super admin may move a user between companies.
+    if (companyId !== undefined && isSuperAdmin(req)) {
+      if (companyId) {
+        const company = await prisma.company.findUnique({ where: { id: String(companyId) }, select: { id: true } });
+        if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+      }
+      updateData.companyId = companyId || null;
+    }
     if (aadhaarNo !== undefined) updateData.aadhaarNo = aadhaarNo ? String(aadhaarNo).trim() : null;
     if (panNo !== undefined) updateData.panNo = panNo ? String(panNo).trim().toUpperCase() : null;
     if (address !== undefined) updateData.address = address ? String(address).trim() : null;
     if (emergencyContact !== undefined) updateData.emergencyContact = emergencyContact ? String(emergencyContact).trim() : null;
     if (dateOfBirth !== undefined) updateData.dateOfBirth = dateOfBirth ? String(dateOfBirth).trim() : null;
 
-    // Direct password reset by Super Admin
+    // Direct password reset by Super Admin / Manager (own company only)
     if (password && password.trim()) {
       const policy = validatePasswordPolicy(password);
       if (!policy.valid) {
         return res.status(400).json({ success: false, message: policy.message });
       }
-      updateData.passwordHash = await bcrypt.hash(password, 10);
+      updateData.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
       // Revoke user's existing sessions
       await prisma.refreshToken.deleteMany({ where: { userId: id } });
     }
@@ -1375,7 +1242,7 @@ export const updateUser = async (req: AuthRequest, res: Response) => {
           role: roleTitle,
           companyName: updatedUser.company?.name || 'ChitKart Platform',
           companyCode: updatedUser.company?.code || undefined,
-          loginUrl: process.env.PORTAL_URL || 'https://chit-fund-mobile.vercel.app',
+          loginUrl: env.portalUrl,
         });
         credentialsEmailSent = true;
       } catch (e: any) {
@@ -1386,10 +1253,10 @@ export const updateUser = async (req: AuthRequest, res: Response) => {
     return res.json({
       success: true,
       message: `User credentials for @${updatedUser.username} updated successfully.${password ? ' Password reset complete.' : ''}${credentialsEmailSent ? ` New credentials dispatched to ${updatedUser.email}.` : ''}`,
-      data: { ...updatedUser, credentialsEmailSent },
+      data: { ...withoutPasswordHash(updatedUser), credentialsEmailSent },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1405,10 +1272,8 @@ export const deleteUser = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: 'You cannot delete your own account.' });
     }
 
-    const targetUser = await prisma.user.findUnique({ where: { id } });
-    if (!targetUser) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
+    // Tenant isolation: managers can only manage users of their own company.
+    const targetUser = await loadUserForTenant(req, id);
 
     if (targetUser.role === 'SUPER_ADMIN' && req.user?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ success: false, message: 'Only Super Administrators can delete Super Admin accounts.' });
@@ -1464,6 +1329,6 @@ export const deleteUser = async (req: AuthRequest, res: Response) => {
         : `User @${targetUser.username} has linked financial records. Account was safely deactivated and all active sessions revoked.`,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../config/prisma.js';
+import { env } from '../config/env.js';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -13,31 +14,51 @@ export interface AuthRequest extends Request {
   };
 }
 
+export const ROLES = ['SUPER_ADMIN', 'MANAGER', 'COLLECTION_STAFF'] as const;
+
+/**
+ * Verifies the Bearer access token and loads the user from the database.
+ *
+ * Role and company are always taken from the database row, never from the token
+ * payload or the request, so a client cannot change its own role/company.
+ * The token must carry a sessionId that still exists (single active session /
+ * revocation on logout, password change and suspension).
+ */
 export const authenticateToken = async (req: AuthRequest, res: Response, next: NextFunction) => {
   // Enforce tab-isolated Bearer header authorization to prevent cross-tab cookie bleeding
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
 
   if (!token) {
     return res.status(401).json({ success: false, message: 'Authentication token required' });
   }
 
+  let decoded: jwt.JwtPayload;
   try {
-    const secret = process.env.JWT_SECRET || 'chitfund_super_secure_jwt_secret_key_2026!@#';
-    const decoded = jwt.verify(token, secret) as any;
+    const payload = jwt.verify(token, env.jwtSecret, { algorithms: ['HS256'] });
+    if (typeof payload === 'string') throw new Error('Unexpected token payload');
+    decoded = payload;
+  } catch {
+    // Status 403 kept for compatibility with the existing mobile/web client.
+    return res.status(403).json({ success: false, message: 'Invalid or expired authentication token' });
+  }
 
-    // Single active screen check: verify that this specific session has not been superseded by a new login
-    if (decoded.sessionId) {
-      const activeSession = await prisma.refreshToken.findUnique({
-        where: { id: decoded.sessionId },
+  if (typeof decoded.userId !== 'string' || typeof decoded.sessionId !== 'string') {
+    return res.status(403).json({ success: false, message: 'Invalid or expired authentication token' });
+  }
+
+  try {
+    // Single active screen check: verify that this specific session has not been superseded or revoked
+    const activeSession = await prisma.refreshToken.findUnique({
+      where: { id: decoded.sessionId },
+      select: { userId: true, expiresAt: true },
+    });
+    if (!activeSession || activeSession.userId !== decoded.userId || activeSession.expiresAt < new Date()) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_TERMINATED',
+        message: 'This account was logged in from another screen. You have been logged out.',
       });
-      if (!activeSession) {
-        return res.status(401).json({
-          success: false,
-          code: 'SESSION_TERMINATED',
-          message: 'This account was logged in from another screen. You have been logged out.',
-        });
-      }
     }
 
     const user = await prisma.user.findUnique({
@@ -62,6 +83,15 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       return res.status(403).json({ success: false, message: 'User account is inactive or disabled' });
     }
 
+    if (!(ROLES as readonly string[]).includes(user.role)) {
+      return res.status(403).json({ success: false, message: 'User account has an unknown role' });
+    }
+
+    // Non super-admin accounts must belong to a company
+    if (user.role !== 'SUPER_ADMIN' && !user.companyId) {
+      return res.status(403).json({ success: false, message: 'User account is not linked to a company' });
+    }
+
     // Block non-SUPER_ADMIN users if their company has been deleted
     if (
       user.role !== 'SUPER_ADMIN' &&
@@ -79,7 +109,8 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       user.role !== 'SUPER_ADMIN' &&
       user.company &&
       user.company.status === 'SUSPENDED' &&
-      ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
+      ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
+      !req.path.endsWith('/auth/logout')
     ) {
       return res.status(403).json({
         success: false,
@@ -98,7 +129,8 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
 
     next();
   } catch (err) {
-    return res.status(403).json({ success: false, message: 'Invalid or expired authentication token' });
+    console.error('[Auth] Session verification failed:', err instanceof Error ? err.message : err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 

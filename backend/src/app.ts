@@ -1,10 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import morgan from 'morgan';
+import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import compression from 'compression';
+import { env } from './config/env.js';
 import { authenticateToken, requireRoles } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { apiLimiter, exportLimiter, loginLimiter, otpRequestLimiter, otpVerifyLimiter, refreshLimiter } from './middleware/rateLimit.js';
 
 import * as authController from './modules/auth/auth.controller.js';
 import * as subscriberController from './modules/subscribers/subscriber.controller.js';
@@ -21,15 +23,27 @@ import * as khataController from './modules/khata/khata.controller.js';
 
 const app = express();
 
+// Correct client IPs (rate limiting, audit logs) behind Vercel / Render proxies.
+app.set('trust proxy', env.trustProxy);
+app.disable('x-powered-by');
+
+app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(compression());
 
+// CORS: only origins listed in CORS_ORIGINS may call the API from a browser.
+// Requests without an Origin header (native mobile app, curl, server-to-server) are allowed;
+// they are still subject to Bearer token authentication.
 app.use(cors({
-  origin: (origin, callback) => callback(null, true),
+  origin: (origin, callback) => {
+    if (!origin || env.corsOrigins.includes('*') || env.corsOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
 app.use(cookieParser());
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+// Receipt / bill photos are sent inline as base64 data URLs (validated per-field against MAX_UPLOAD_BYTES).
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // In-memory buffer of recent API requests for Super Admin observability
 export interface ApiLogEntry {
   id: string;
@@ -78,6 +92,7 @@ app.use((req, res, next) => {
 
 // Core Router for ChitKart API
 const router = express.Router();
+router.use(apiLimiter);
 
 // Healthcheck
 router.get('/health', (req, res) => {
@@ -85,13 +100,13 @@ router.get('/health', (req, res) => {
 });
 
 // Authentication Routes (JWT + Cookies + Sessions + OTP)
-router.post('/auth/login', authController.login);
+router.post('/auth/login', loginLimiter, authController.login);
 router.post('/auth/logout', authenticateToken, authController.logout);
-router.post('/auth/refresh-token', authController.refreshToken);
+router.post('/auth/refresh-token', refreshLimiter, authController.refreshToken);
 router.post('/auth/change-password', authenticateToken, authController.changePassword);
-router.post('/auth/forgot-password', authController.forgotPassword);
-router.post('/auth/verify-otp', authController.verifyOtp);
-router.post('/auth/reset-password', authController.resetPassword);
+router.post('/auth/forgot-password', otpRequestLimiter, authController.forgotPassword);
+router.post('/auth/verify-otp', otpVerifyLimiter, authController.verifyOtp);
+router.post('/auth/reset-password', otpVerifyLimiter, authController.resetPassword);
 router.get('/auth/me', authenticateToken, authController.me);
 router.put('/auth/profile', authenticateToken, authController.updateProfile);
 
@@ -223,8 +238,8 @@ router.post('/super-admin/backups/trigger', authenticateToken, requireRoles('SUP
 
 // SA-17: Database Data Export & Dynamic Table Discovery
 router.get('/super-admin/export/tables', authenticateToken, requireRoles('SUPER_ADMIN'), superAdminController.getDatabaseTables);
-router.get('/super-admin/export', authenticateToken, requireRoles('SUPER_ADMIN'), superAdminController.exportData);
-router.get('/super-admin/export/:entity', authenticateToken, requireRoles('SUPER_ADMIN'), superAdminController.exportData);
+router.get('/super-admin/export', exportLimiter, authenticateToken, requireRoles('SUPER_ADMIN'), superAdminController.exportData);
+router.get('/super-admin/export/:entity', exportLimiter, authenticateToken, requireRoles('SUPER_ADMIN'), superAdminController.exportData);
 
 // SA-19, SA-20: Financial Periods & Archival Policy
 router.get('/super-admin/financial-periods', authenticateToken, requireRoles('SUPER_ADMIN'), superAdminController.getFinancialPeriods);
@@ -275,6 +290,11 @@ app.use('/api/v1', router);
 app.use('/v1', router);
 app.use('/api', router);
 app.use('/', router);
+
+// Unknown API routes
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: 'Route not found' });
+});
 
 // Global Error Handler
 app.use(errorHandler);

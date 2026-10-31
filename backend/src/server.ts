@@ -1,14 +1,10 @@
+import { env } from './config/env.js';
 import app from './app.js';
-import dotenv from 'dotenv';
 
-dotenv.config();
-
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
+app.listen(env.port, () => {
   console.log(`=======================================================`);
-  console.log(` Enterprise Chit Fund Platform Backend Server`);
-  console.log(` Running on port: http://localhost:${PORT}`);
-  console.log(` API Endpoint: http://localhost:${PORT}/api/v1/health`);
+  console.log(` ChitKart Platform Backend Server (${env.nodeEnv})`);
+  console.log(` Running on port: http://localhost:${env.port}`);
+  console.log(` API Endpoint: http://localhost:${env.port}/api/v1/health`);
   console.log(`=======================================================`);
 });

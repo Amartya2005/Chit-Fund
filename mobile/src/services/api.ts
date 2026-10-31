@@ -2,7 +2,15 @@ import axios from 'axios';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
+// Public (non-secret) build-time configuration. Only EXPO_PUBLIC_* variables are
+// embedded in the app bundle; never put secrets in them. See mobile/.env.example.
+const CONFIGURED_API_URL = (process.env.EXPO_PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
+
 const getDefaultBaseUrl = () => {
+  if (CONFIGURED_API_URL) {
+    return CONFIGURED_API_URL;
+  }
+
   // If running on Web
   if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location) {
     if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
@@ -13,8 +21,9 @@ const getDefaultBaseUrl = () => {
     return `${window.location.origin}/api/v1`;
   }
 
-  // Native mobile default (production backend URL)
-  return 'https://chit-fund-mobile.vercel.app/api/v1';
+  // Native mobile without EXPO_PUBLIC_API_URL: local development backend
+  // (Android emulator reaches the host machine via 10.0.2.2).
+  return Platform.OS === 'android' ? 'http://10.0.2.2:5000/api/v1' : 'http://localhost:5000/api/v1';
 };
 
 export const API_BASE_URL = getDefaultBaseUrl();

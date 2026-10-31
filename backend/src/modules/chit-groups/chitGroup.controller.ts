@@ -1,18 +1,53 @@
 import { Response } from 'express';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { sendError, badRequest } from '../../lib/http.js';
+import { parsePositiveAmount, roundMoney, toPaise, fromPaise } from '../../lib/money.js';
+import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
+import {
+  assertSameCompany,
+  assertUsersInCompany,
+  companyWhere,
+  loadGroupForTenant,
+  loadSubscriberForTenant,
+  requireWriteCompanyId,
+} from '../../security/tenant.js';
+
+const GROUP_STATUSES = ['UPCOMING', 'ACTIVE', 'COMPLETED', 'CLOSED', 'CANCELLED'];
+
+function buildSchedule(groupId: string, startDate: string, totalMonths: number, installment: number) {
+  const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+  const scheduleData = [];
+  for (let i = 1; i <= totalMonths; i++) {
+    const dueDate = new Date(startYear, (startMonth - 1) + (i - 1), startDay);
+    const dYear = dueDate.getFullYear();
+    const dMonth = String(dueDate.getMonth() + 1).padStart(2, '0');
+    const dDay = String(dueDate.getDate()).padStart(2, '0');
+    scheduleData.push({
+      groupId,
+      installmentNo: i,
+      dueDate: `${dYear}-${dMonth}-${dDay}`,
+      scheduledAmount: installment,
+      dividendAmount: 0,
+      netDueAmount: installment,
+    });
+  }
+  return scheduleData;
+}
+
+function validateGroupNumbers(v: { chitValue: number; maxMembers: number; totalMonths: number; installment: number; commission: number }) {
+  if (!Number.isFinite(v.chitValue) || v.chitValue <= 0) throw badRequest('Chit value must be a positive amount');
+  if (!Number.isInteger(v.maxMembers) || v.maxMembers < 1 || v.maxMembers > 1000) throw badRequest('Max members must be a whole number between 1 and 1000');
+  if (!Number.isInteger(v.totalMonths) || v.totalMonths < 1 || v.totalMonths > 600) throw badRequest('Duration must be a whole number of months between 1 and 600');
+  if (!Number.isFinite(v.installment) || v.installment <= 0) throw badRequest('Monthly installment must be a positive amount');
+  if (!Number.isFinite(v.commission) || v.commission < 0 || v.commission > 100) throw badRequest('Foreman commission must be between 0 and 100 percent');
+}
 
 export const listChitGroups = async (req: AuthRequest, res: Response) => {
   try {
-    let companyId = req.user?.companyId;
-    if (!companyId) {
-      const firstCo = await prisma.company.findFirst();
-      companyId = firstCo?.id;
-    }
     const { status } = req.query;
 
-    const where: any = {};
-    if (companyId) where.companyId = companyId;
+    const where: any = { ...companyWhere(req) };
     if (status) where.status = String(status);
 
     // Collection staff can only list and see their assigned chit groups
@@ -83,17 +118,13 @@ export const listChitGroups = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, count: sanitizedGroups.length, data: sanitizedGroups });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const createChitGroup = async (req: AuthRequest, res: Response) => {
   try {
-    let companyId = req.user?.companyId;
-    if (!companyId) {
-      const firstCo = await prisma.company.findFirst();
-      companyId = firstCo?.id!;
-    }
+    const companyId = await requireWriteCompanyId(req);
     const {
       name,
       chitValue,
@@ -111,8 +142,9 @@ export const createChitGroup = async (req: AuthRequest, res: Response) => {
     } = req.body;
 
     const effectiveTotalMonths = Number(totalMonths ?? durationMonths);
-    const effectiveInstallment = Number(monthlyInstallment);
-    const effectiveChitValue = Number(chitValue ?? totalChitValue) || (effectiveInstallment * effectiveTotalMonths);
+    const effectiveInstallment = parsePositiveAmount(monthlyInstallment) || 0;
+    const effectiveChitValue =
+      parsePositiveAmount(chitValue ?? totalChitValue) || fromPaise(toPaise(effectiveInstallment) * (Number.isInteger(effectiveTotalMonths) ? effectiveTotalMonths : 0));
     const effectiveMaxMembers = Number(maxMembers || effectiveTotalMonths);
     const effectiveCommission = Number(foremanCommissionPct ?? foremanCommissionRate ?? 5.0);
 
@@ -120,6 +152,9 @@ export const createChitGroup = async (req: AuthRequest, res: Response) => {
     let effectiveStartDate: string;
     if (startDate && typeof startDate === 'string' && startDate.trim()) {
       effectiveStartDate = startDate.trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveStartDate) || Number.isNaN(Date.parse(effectiveStartDate))) {
+        return res.status(400).json({ success: false, message: 'startDate must be a valid date in YYYY-MM-DD format' });
+      }
     } else {
       try {
         effectiveStartDate = new Intl.DateTimeFormat('en-CA', {
@@ -140,14 +175,37 @@ export const createChitGroup = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const calculatedInstallment = effectiveInstallment || (effectiveChitValue / effectiveTotalMonths);
-    const count = await prisma.chitGroup.count({ where: { companyId } });
-    const groupCode = `CG-${2026 + count + 1}`;
+    if (typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Group name is required' });
+    }
+    const calculatedInstallment = effectiveInstallment || roundMoney(effectiveChitValue / effectiveTotalMonths);
+    validateGroupNumbers({
+      chitValue: effectiveChitValue,
+      maxMembers: effectiveMaxMembers,
+      totalMonths: effectiveTotalMonths,
+      installment: calculatedInstallment,
+      commission: effectiveCommission,
+    });
 
     // Each chit group can have at most ONE assigned staff member
     const singleStaffId = assignedStaffId || (Array.isArray(assignedStaffIds) ? assignedStaffIds[0] : null) || (Array.isArray(staffIds) ? staffIds[0] : null) || null;
+    if (singleStaffId) await assertUsersInCompany([singleStaffId], companyId);
 
-    const group = await prisma.chitGroup.create({
+    // Group, staff assignment, installment schedule and audit log are created atomically.
+    const group = await prisma.$transaction(async (tx) => {
+    // Group code e.g. CG-2027, allocated atomically per company (previously count()+1).
+    const seq = await nextSequence(
+      companyId,
+      'groupCode',
+      async () => {
+        const existing = await tx.chitGroup.findMany({ where: { companyId }, select: { groupCode: true } });
+        return Math.max(2026, maxNumericSuffix(existing.map((g) => g.groupCode), 'CG-'));
+      },
+      tx
+    );
+    const groupCode = `CG-${seq}`;
+
+    const group = await tx.chitGroup.create({
       data: {
         companyId,
         groupCode,
@@ -168,35 +226,17 @@ export const createChitGroup = async (req: AuthRequest, res: Response) => {
 
     // Create single staff assignment if staff member is selected
     if (singleStaffId) {
-      await prisma.chitGroupStaff.create({
+      await tx.chitGroupStaff.create({
         data: { groupId: group.id, staffId: singleStaffId },
       });
     }
 
     // Auto-generate Installment Schedules for all totalMonths
-    const [startYear, startMonth, startDay] = effectiveStartDate.split('-').map(Number);
-    const scheduleData = [];
-    for (let i = 1; i <= effectiveTotalMonths; i++) {
-      const dueDate = new Date(startYear, (startMonth - 1) + (i - 1), startDay);
-      const dYear = dueDate.getFullYear();
-      const dMonth = String(dueDate.getMonth() + 1).padStart(2, '0');
-      const dDay = String(dueDate.getDate()).padStart(2, '0');
-
-      scheduleData.push({
-        groupId: group.id,
-        installmentNo: i,
-        dueDate: `${dYear}-${dMonth}-${dDay}`,
-        scheduledAmount: calculatedInstallment,
-        dividendAmount: 0.0,
-        netDueAmount: calculatedInstallment,
-      });
-    }
-
-    await prisma.installmentSchedule.createMany({
-      data: scheduleData,
+    await tx.installmentSchedule.createMany({
+      data: buildSchedule(group.id, effectiveStartDate, effectiveTotalMonths, calculatedInstallment),
     });
 
-    await prisma.auditLog.create({
+    await tx.auditLog.create({
       data: {
         companyId,
         userId: req.user?.id,
@@ -207,28 +247,33 @@ export const createChitGroup = async (req: AuthRequest, res: Response) => {
       },
     });
 
+    return group;
+    });
+
     return res.status(201).json({ success: true, data: group });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const enrollSubscriber = async (req: AuthRequest, res: Response) => {
   try {
-    const { groupId, subscriberId } = req.body;
+    const { groupId, subscriberId } = req.body || {};
 
     if (!groupId || !subscriberId) {
       return res.status(400).json({ success: false, message: 'groupId and subscriberId are required' });
     }
 
-    const group = await prisma.chitGroup.findUnique({
-      where: { id: groupId },
+    const groupRecord = await loadGroupForTenant(req, groupId);
+    const subscriberRecord = await loadSubscriberForTenant(req, subscriberId);
+    if (subscriberRecord.companyId !== groupRecord.companyId) {
+      return res.status(404).json({ success: false, message: 'Subscriber not found' });
+    }
+
+    const group = await prisma.chitGroup.findUniqueOrThrow({
+      where: { id: groupRecord.id },
       include: { members: true, staffAssignments: true },
     });
-
-    if (!group) {
-      return res.status(404).json({ success: false, message: 'Chit group not found' });
-    }
 
     // Role check: Staff can only enroll/assign members to their own assigned chit group
     if (req.user?.role === 'COLLECTION_STAFF') {
@@ -257,7 +302,8 @@ export const enrollSubscriber = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: 'Chit group has reached maximum member capacity' });
     }
 
-    const ticketNumber = group.members.length + 1;
+    // Next free ticket number (max + 1, so a removed member's number is never reused twice).
+    const ticketNumber = group.members.reduce((max, m) => Math.max(max, m.ticketNumber), 0) + 1;
 
     const membership = await prisma.chitGroupMember.create({
       data: {
@@ -288,13 +334,14 @@ export const enrollSubscriber = async (req: AuthRequest, res: Response) => {
 
     return res.status(201).json({ success: true, message: `Member assigned successfully to group ${group.name}`, data: membership });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const getChitGroupDetails = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    await loadGroupForTenant(req, id);
     const group = await prisma.chitGroup.findUnique({
       where: { id },
       include: {
@@ -345,13 +392,12 @@ export const getChitGroupDetails = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, data: group });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const updateChitGroup = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId;
     const { id } = req.params;
     const {
       name,
@@ -380,8 +426,12 @@ export const updateChitGroup = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, message: 'Chit group not found' });
     }
 
-    if (req.user?.role !== 'SUPER_ADMIN' && existingGroup.companyId !== companyId) {
-      return res.status(403).json({ success: false, message: 'Access denied: Cannot update group outside your company' });
+    assertSameCompany(req, existingGroup.companyId, 'Chit group');
+    if (status !== undefined && status !== null && status !== '' && !GROUP_STATUSES.includes(status)) {
+      return res.status(400).json({ success: false, message: `Invalid status. Allowed: ${GROUP_STATUSES.join(', ')}` });
+    }
+    if (startDate !== undefined && startDate !== null && startDate !== '' && (typeof startDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(startDate.trim()))) {
+      return res.status(400).json({ success: false, message: 'startDate must be in YYYY-MM-DD format' });
     }
 
     const newChitValue =
@@ -404,8 +454,15 @@ export const updateChitGroup = async (req: AuthRequest, res: Response) => {
         : existingGroup.foremanCommissionPct;
     const newMonthly =
       monthlyInstallment !== undefined
-        ? Number(monthlyInstallment)
-        : newChitValue / newTotalMonths;
+        ? roundMoney(Number(monthlyInstallment))
+        : roundMoney(newChitValue / newTotalMonths);
+    validateGroupNumbers({
+      chitValue: Number(newChitValue),
+      maxMembers: maxMembers !== undefined ? Number(maxMembers) : existingGroup.maxMembers,
+      totalMonths: Number(newTotalMonths),
+      installment: newMonthly,
+      commission: Number(newCommission),
+    });
 
     if (maxMembers && Number(maxMembers) < existingGroup._count.members) {
       return res.status(400).json({
@@ -418,6 +475,8 @@ export const updateChitGroup = async (req: AuthRequest, res: Response) => {
     const singleStaffId = assignedStaffId !== undefined
       ? (assignedStaffId || null)
       : (Array.isArray(assignedStaffIds) ? (assignedStaffIds[0] || null) : (Array.isArray(staffIds) ? (staffIds[0] || null) : undefined));
+
+    if (singleStaffId) await assertUsersInCompany([singleStaffId], existingGroup.companyId);
 
     if (assignedStaffIds !== undefined || staffIds !== undefined || assignedStaffId !== undefined) {
       await prisma.chitGroupStaff.deleteMany({ where: { groupId: id } });
@@ -461,24 +520,10 @@ export const updateChitGroup = async (req: AuthRequest, res: Response) => {
       (newTotalMonths !== existingGroup.totalMonths ||
         newChitValue !== existingGroup.chitValue)
     ) {
-      await prisma.installmentSchedule.deleteMany({ where: { groupId: id } });
-      const [startYear, startMonth, startDay] = updated.startDate.split('-').map(Number);
-      const scheduleData = [];
-      for (let i = 1; i <= Number(newTotalMonths); i++) {
-        const dueDate = new Date(startYear, (startMonth - 1) + (i - 1), startDay);
-        const dYear = dueDate.getFullYear();
-        const dMonth = String(dueDate.getMonth() + 1).padStart(2, '0');
-        const dDay = String(dueDate.getDate()).padStart(2, '0');
-        scheduleData.push({
-          groupId: id,
-          installmentNo: i,
-          dueDate: `${dYear}-${dMonth}-${dDay}`,
-          scheduledAmount: newMonthly,
-          dividendAmount: 0.0,
-          netDueAmount: newMonthly,
-        });
-      }
-      await prisma.installmentSchedule.createMany({ data: scheduleData });
+      await prisma.$transaction([
+        prisma.installmentSchedule.deleteMany({ where: { groupId: id } }),
+        prisma.installmentSchedule.createMany({ data: buildSchedule(id, updated.startDate, Number(newTotalMonths), newMonthly) }),
+      ]);
     }
 
     await prisma.auditLog.create({
@@ -494,7 +539,7 @@ export const updateChitGroup = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, message: 'Chit group updated successfully', data: updated });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -506,17 +551,15 @@ export const updateChitGroup = async (req: AuthRequest, res: Response) => {
 export const assignStaffToGroup = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { staffIds, assignedStaffId, assignedStaffIds } = req.body;
+    const { staffIds, assignedStaffId, assignedStaffIds } = req.body || {};
 
-    const group = await prisma.chitGroup.findUnique({ where: { id } });
-    if (!group) {
-      return res.status(404).json({ success: false, message: 'Chit group not found' });
-    }
+    const group = await loadGroupForTenant(req, id);
 
     // Multiple staff cannot assign to a single chit group: enforce at most one staff
     const singleStaffId = assignedStaffId !== undefined
       ? (assignedStaffId || null)
       : (Array.isArray(assignedStaffIds) ? (assignedStaffIds[0] || null) : (Array.isArray(staffIds) ? (staffIds[0] || null) : null));
+    if (singleStaffId) await assertUsersInCompany([singleStaffId], group.companyId);
 
     await prisma.chitGroupStaff.deleteMany({ where: { groupId: id } });
     if (singleStaffId) {
@@ -544,13 +587,12 @@ export const assignStaffToGroup = async (req: AuthRequest, res: Response) => {
       data: updated,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 export const deleteChitGroup = async (req: AuthRequest, res: Response) => {
   try {
-    const companyId = req.user?.companyId;
     const { id } = req.params;
 
     const group = await prisma.chitGroup.findUnique({
@@ -570,9 +612,7 @@ export const deleteChitGroup = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, message: 'Chit group not found' });
     }
 
-    if (req.user?.role !== 'SUPER_ADMIN' && group.companyId !== companyId) {
-      return res.status(403).json({ success: false, message: 'Access denied: Cannot delete group outside your company' });
-    }
+    assertSameCompany(req, group.companyId, 'Chit group');
 
     if (group._count.transactions > 0) {
       return res.status(400).json({
@@ -605,6 +645,6 @@ export const deleteChitGroup = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, message: `Chit group '${group.name}' deleted successfully.` });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };

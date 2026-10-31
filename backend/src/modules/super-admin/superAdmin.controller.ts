@@ -2,13 +2,32 @@ import { Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
+import { sendError } from '../../lib/http.js';
+import { env } from '../../config/env.js';
 import { validatePasswordPolicy, createUser } from '../auth/auth.controller.js';
 import { sendAdminCredentialsEmail } from '../../services/email.service.js';
 
+/**
+ * Remove secrets from exported rows: password hashes, live session/refresh tokens
+ * and password-reset OTP records must never leave the database.
+ */
+function sanitizeExportRow(table: string, row: any) {
+  if (!row || typeof row !== 'object') return row;
+  const { passwordHash, ...rest } = row;
+  if (table === 'RefreshToken') {
+    const { token, ...withoutToken } = rest;
+    return { ...withoutToken, token: '[REDACTED]' };
+  }
+  if (table === 'AuditLog' && rest.action === 'PASSWORD_RESET_OTP') {
+    return { ...rest, details: '[REDACTED]' };
+  }
+  return rest;
+}
+
 // Global In-Memory Platform Configuration & Template Store (FR-SA-011, FR-SA-015)
-let platformSettings = {
+const platformSettings = {
   platformName: 'ChitKart Management Platform',
-  supportEmail: 'akshatrajpati@gmail.com',
+  supportEmail: process.env.SUPPORT_EMAIL || env.smtp.user || '',
   maintenanceMode: false,
   saasModeEnabled: true,
   lastBackupAt: new Date(Date.now() - 3600000).toISOString(),
@@ -20,7 +39,7 @@ let platformSettings = {
 };
 
 // Subscription Plans Catalog (FR-SA-006, FR-SA-007)
-let subscriptionPlans = [
+const subscriptionPlans = [
   {
     id: 'plan_starter',
     name: 'Starter Plan',
@@ -125,7 +144,7 @@ export const getPlatformDashboard = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -195,7 +214,7 @@ export const listCompanies = async (req: AuthRequest, res: Response) => {
 
     return res.json({ success: true, data: enriched });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -351,7 +370,7 @@ export const createCompany = async (req: AuthRequest, res: Response) => {
         role: 'Company Administrator (Manager)',
         companyName: newCompany.name,
         companyCode: newCompany.code,
-        loginUrl: process.env.PORTAL_URL || 'https://chit-fund-mobile.vercel.app',
+        loginUrl: env.portalUrl,
       });
       credentialsEmailSent = !!emailResult.success;
       if (!emailResult.success) {
@@ -406,7 +425,7 @@ export const createCompany = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -598,7 +617,7 @@ export const deleteCompany = async (req: AuthRequest, res: Response) => {
       data: { id: company.id, status: 'DELETED' },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -654,7 +673,7 @@ export const getCompanyDetails = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -759,7 +778,7 @@ export const updateCompany = async (req: AuthRequest, res: Response) => {
       data: updated,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -828,7 +847,7 @@ export const updateCompanyStatus = async (req: AuthRequest, res: Response) => {
       data: { id: updated.id, status: updated.status },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -884,7 +903,7 @@ export const updateCompanySettings = async (req: AuthRequest, res: Response) => 
       data: updatedSub,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -974,7 +993,7 @@ export const getAuditLogs = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1032,7 +1051,7 @@ export const getSystemHealth = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1077,7 +1096,7 @@ export const updatePlatformSettings = async (req: AuthRequest, res: Response) =>
       data: platformSettings,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1128,7 +1147,7 @@ export const requestSupportAccess = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1164,7 +1183,7 @@ export const rejectFinancialRecordMutation = async (req: AuthRequest, res: Respo
 // ==========================================
 // SA-05, SA-06: ROLE & PERMISSION MANAGEMENT
 // ==========================================
-let rolesPermissionsStore = [
+const rolesPermissionsStore = [
   {
     role: 'SUPER_ADMIN',
     description: 'Platform Owner with unrestricted oversight',
@@ -1201,7 +1220,7 @@ export const updateRolePermissions = async (req: AuthRequest, res: Response) => 
 // ==========================================
 // SA-12: COMPLIANCE SETTINGS & REGULATORY CHECKLIST
 // ==========================================
-let complianceChecklists = [
+const complianceChecklists = [
   {
     id: 'comp_1',
     regNumber: 'CHIT-SEC-4-SANCTION-2026',
@@ -1354,14 +1373,14 @@ export const getSuperAdminComplianceReports = async (req: AuthRequest, res: Resp
     });
   } catch (err: any) {
     console.error('getSuperAdminComplianceReports error:', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 // ==========================================
 // SA-13: INTEGRATIONS CONFIGURATION
 // ==========================================
-let integrationsStore = {
+const integrationsStore = {
   paymentGateway: {
     provider: 'Razorpay / Cashfree UPI',
     status: 'ACTIVE',
@@ -1369,10 +1388,10 @@ let integrationsStore = {
     webhookConfigured: true,
   },
   emailService: {
-    provider: 'Gmail SMTP',
-    status: 'ACTIVE',
-    user: 'akshatrajpati@gmail.com',
-    authType: 'App Password Verified',
+    provider: env.smtp.host || 'SMTP',
+    status: env.smtp.enabled ? 'ACTIVE' : 'NOT_CONFIGURED',
+    user: env.smtp.user || null,
+    authType: env.smtp.enabled ? 'Configured via environment' : 'Not configured',
   },
   smsGateway: {
     provider: 'DLT SMS Fast2SMS',
@@ -1505,7 +1524,7 @@ export const getDatabaseTables = async (req: AuthRequest, res: Response) => {
       ],
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1539,13 +1558,7 @@ export const exportData = async (req: AuthRequest, res: Response) => {
         try {
           const rows: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM "${tbl}";`);
           // Sanitize sensitive credentials if User table
-          const sanitizedRows = rows.map((r) => {
-            if (r && typeof r === 'object' && 'passwordHash' in r) {
-              const { passwordHash, ...safeUser } = r;
-              return safeUser;
-            }
-            return r;
-          });
+          const sanitizedRows = rows.map((r) => sanitizeExportRow(tbl, r));
           tablesData[tbl] = sanitizedRows;
           tableCounts[tbl] = sanitizedRows.length;
           totalCount += sanitizedRows.length;
@@ -1623,13 +1636,7 @@ export const exportData = async (req: AuthRequest, res: Response) => {
     }
 
     const rows: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM "${targetTable}";`);
-    const sanitizedRows = rows.map((r) => {
-      if (r && typeof r === 'object' && 'passwordHash' in r) {
-        const { passwordHash, ...safeUser } = r;
-        return safeUser;
-      }
-      return r;
-    });
+    const sanitizedRows = rows.map((r) => sanitizeExportRow(targetTable, r));
 
     try {
       await prisma.auditLog.create({
@@ -1652,14 +1659,14 @@ export const exportData = async (req: AuthRequest, res: Response) => {
       entity: targetTable,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
 // ==========================================
 // SA-19, SA-20: FINANCIAL PERIODS & ARCHIVAL
 // ==========================================
-let financialPeriods = [
+const financialPeriods = [
   { id: 'fy_2025_2026', name: 'FY 2025-2026', startDate: '2025-04-01', endDate: '2026-03-31', status: 'CLOSED', closedBy: 'SUPER_ADMIN', closedAt: '2026-04-05' },
   { id: 'fy_2026_2027', name: 'FY 2026-2027', startDate: '2026-04-01', endDate: '2027-03-31', status: 'ACTIVE', currentPeriod: true },
 ];
@@ -1726,7 +1733,7 @@ export const getMultiBranchExceptions = async (req: AuthRequest, res: Response) 
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
@@ -1751,7 +1758,7 @@ export const listSuperAdmins = async (req: AuthRequest, res: Response) => {
     });
     return res.json({ success: true, data: admins });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err);
   }
 };
 
