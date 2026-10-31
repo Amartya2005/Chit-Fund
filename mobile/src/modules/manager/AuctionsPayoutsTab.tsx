@@ -12,6 +12,12 @@ import {
 import { api } from '../../services/api';
 import { mStyles } from './commonStyles';
 
+// INR with Indian digit grouping, e.g. ₹1,00,000 (P0: E10 for this screen).
+const inr = (n: number | null | undefined) =>
+  n === null || n === undefined || Number.isNaN(Number(n))
+    ? '—'
+    : `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+
 export function AuctionsPayoutsTab({ user }: { user: any }) {
   const [subTab, setSubTab] = useState<'AUCTIONS' | 'PAYOUTS'>('AUCTIONS');
   const [groups, setGroups] = useState<any[]>([]);
@@ -27,6 +33,9 @@ export function AuctionsPayoutsTab({ user }: { user: any }) {
   const [winningDiscount, setWinningDiscount] = useState('20000');
   const [winningSubId, setWinningSubId] = useState('');
   const [enrolledMembers, setEnrolledMembers] = useState<any[]>([]);
+  const [eligibilityInfo, setEligibilityInfo] = useState<any>(null);
+  const [preview, setPreview] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   // Payout State (AC-26, AC-27)
   const [selectedPayout, setSelectedPayout] = useState<any>(null);
@@ -67,44 +76,82 @@ export function AuctionsPayoutsTab({ user }: { user: any }) {
     fetchData();
   }, []);
 
+  // Ticket list with eligibility derived by the backend from database records.
+  const loadEligibility = async (groupId: string) => {
+    const res = await api.get(`/auctions/group/${groupId}/eligibility`);
+    if (res.data.success) {
+      const info = res.data.data;
+      setEligibilityInfo(info);
+      setEnrolledMembers(info.tickets || []);
+      return info;
+    }
+    return null;
+  };
+
   const selectGroup = async (grp: any) => {
     setSelectedGroupId(grp.id);
     setSelectedGroup(grp);
-    setAuctionInstNo(String(grp.currentInstallmentNo || 1));
+    setPreview(null);
     try {
-      const res = await api.get(`/chit-groups/${grp.id}`);
-      if (res.data.success) {
-        const memberships = res.data.data.members || res.data.data.memberships || [];
-        setEnrolledMembers(memberships);
-        // Default winner to first non-prized member
-        const nonPrized = memberships.find((m: any) => !m.isPrized);
-        if (nonPrized) {
-          setWinningSubId(nonPrized.subscriberId);
-        }
+      const info = await loadEligibility(grp.id);
+      if (info) {
+        setAuctionInstNo(String(info.nextInstallmentNo || 1));
+        // Default selection: first eligible ticket that has not won yet (a convenience only —
+        // repeat wins are not blocked by the system; see eligibility notes).
+        const tickets = info.tickets || [];
+        const preferred = tickets.find((t: any) => t.eligible && !t.isPrized) || tickets.find((t: any) => t.eligible);
+        setWinningSubId(preferred ? preferred.subscriberId : '');
       }
     } catch (e) {
       console.error(e);
     }
   };
 
-  // Calculations (AC-24, AC-25)
-  const chitValue = selectedGroup?.chitValue || selectedGroup?.totalChitValue || 100000;
-  const numMembers = selectedGroup?.maxMembers || 20;
+  const chitValue = selectedGroup?.chitValue || 0;
+  const numMembers = selectedGroup?.maxMembers || 0;
   const discount = Number(winningDiscount) || 0;
-  const commissionRate = selectedGroup?.foremanCommissionPct || selectedGroup?.foremanCommissionRate || 5;
-  const foremanCommission = (chitValue * commissionRate) / 100; // 5%
-  const totalDividend = Math.max(0, discount - foremanCommission);
-  const dividendPerMember = numMembers > 0 ? totalDividend / numMembers : 0;
-  const netPrizeAmount = chitValue - discount;
+  const selectedTicket = enrolledMembers.find((t: any) => t.subscriberId === winningSubId);
+
+  // Financial preview is calculated by the backend (same code path as confirmation).
+  useEffect(() => {
+    if (!selectedGroupId || winningDiscount === '' || !auctionInstNo) {
+      setPreview(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        setPreviewLoading(true);
+        const res = await api.post('/auctions/preview', {
+          groupId: selectedGroupId,
+          installmentNo: Number(auctionInstNo),
+          winningBidDiscount: winningDiscount,
+          winnerSubscriberId: winningSubId || undefined,
+        });
+        if (!cancelled && res.data.success) setPreview(res.data.data);
+      } catch (e: any) {
+        if (!cancelled) setPreview({ valid: false, errors: [{ code: e.response?.data?.code || 'ERROR', message: e.response?.data?.message || 'Could not calculate preview' }] });
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [selectedGroupId, winningDiscount, auctionInstNo, winningSubId]);
+
+  const calc = preview?.calculation;
+  const canConfirm = !!preview?.valid && !!selectedTicket && !submitting;
 
   // AC-23, AC-24, AC-25: Confirm Auction & Post Allocation
   const handleConfirmAuction = async () => {
-    if (!selectedGroupId || !winningSubId || !winningDiscount) {
+    if (!selectedGroupId || !winningSubId || winningDiscount === '') {
       alert('Group, Winner, and Bid Discount are required');
       return;
     }
-    if (discount < foremanCommission) {
-      alert(`Winning bid discount cannot be less than 5% foreman commission (₹${foremanCommission.toLocaleString()})`);
+    if (!preview?.valid) {
+      alert((preview?.errors || []).map((e: any) => e.message).join('\n') || 'Please review the auction details.');
       return;
     }
     try {
@@ -113,23 +160,28 @@ export function AuctionsPayoutsTab({ user }: { user: any }) {
         groupId: selectedGroupId,
         installmentNo: Number(auctionInstNo),
         auctionDate,
-        winningBidDiscount: discount,
-        winningSubscriberId: winningSubId,
+        winningBidDiscount: winningDiscount,
+        winnerSubscriberId: winningSubId,
+        winnerMemberId: selectedTicket?.memberId,
       });
 
       if (res.data.success) {
+        const d = res.data.data;
         alert(
           `🎉 Auction confirmed successfully!\n\n` +
-          `Net Prize Payable: ₹${netPrizeAmount.toLocaleString()}\n` +
-          `Foreman Commission: ₹${foremanCommission.toLocaleString()}\n` +
-          `Dividend Per Member: ₹${dividendPerMember.toLocaleString()}\n\n` +
-          `Prize payout record created and pending disbursement.`
+          `Winner: Ticket #${d.winner?.ticketNumber} — ${d.winner?.subscriber?.fullName || ''}\n` +
+          `Gross Prize Payable: ${inr(d.payout?.grossBidAmount)}\n` +
+          `Foreman Commission: ${inr(d.foremanCommission)}\n` +
+          `Dividend Per Ticket: ${inr(d.dividendPerMember)}\n` +
+          (d.pendingDecisionTotal > 0 ? `Dividend pending decision (not credited): ${inr(d.pendingDecisionTotal)}\n` : '') +
+          `\nPrize payout record created and pending disbursement.`
         );
         fetchData();
         setSubTab('PAYOUTS');
       }
     } catch (e: any) {
       alert(e.response?.data?.message || 'Failed to confirm auction');
+      if (selectedGroupId) loadEligibility(selectedGroupId).catch(() => {});
     } finally {
       setSubmitting(false);
     }
@@ -215,7 +267,7 @@ export function AuctionsPayoutsTab({ user }: { user: any }) {
                 Auction Execution Roster & Calculation Engine (AC-23, AC-24)
               </Text>
               <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 16 }}>
-                Chit Value: ₹{chitValue.toLocaleString()} • Members: {numMembers} • Monthly Due: ₹{(selectedGroup.monthlyInstallment || 0).toLocaleString()}
+                Chit Value: {inr(chitValue)} • Seats: {numMembers} • Monthly Due: {inr(selectedGroup.monthlyInstallment || 0)}
               </Text>
 
               <View style={{ flexDirection: 'row', gap: 12 }}>
@@ -249,69 +301,121 @@ export function AuctionsPayoutsTab({ user }: { user: any }) {
                 onChangeText={setWinningDiscount}
               />
 
-              {/* Dynamic Calculation Box (AC-24, AC-25) */}
+              {/* Calculation preview from the backend (AC-24, AC-25) */}
               <View
                 style={{
                   backgroundColor: '#F8FAFC',
                   borderRadius: 10,
                   padding: 16,
                   borderWidth: 1,
-                  borderColor: '#E2E8F0',
+                  borderColor: preview && !preview.valid ? '#FCA5A5' : '#E2E8F0',
                   marginVertical: 12,
                 }}
               >
                 <Text style={{ fontWeight: '800', fontSize: 14, color: '#0F2F52', marginBottom: 10 }}>
-                  📊 Contractual Rules & Dividend Split Breakdown:
+                  📊 Calculation Preview {previewLoading ? '(updating…)' : ''}
                 </Text>
-                <View style={{ gap: 6 }}>
-                  <Text style={{ fontSize: 13, color: '#334155' }}>
-                    • Total Gross Chit Pot Value: <Text style={{ fontWeight: '700' }}>₹{chitValue.toLocaleString()}</Text>
-                  </Text>
-                  <Text style={{ fontSize: 13, color: '#334155' }}>
-                    • Winning Bid Discount Given Up: <Text style={{ fontWeight: '700', color: '#D97706' }}>₹{discount.toLocaleString()}</Text>
-                  </Text>
-                  <Text style={{ fontSize: 13, color: '#334155' }}>
-                    • Net Prize Payout To Winner: <Text style={{ fontWeight: '800', color: '#16A34A' }}>₹{netPrizeAmount.toLocaleString()}</Text>
-                  </Text>
-                  <Text style={{ fontSize: 13, color: '#334155' }}>
-                    • Foreman Commission ({commissionRate}%): <Text style={{ fontWeight: '700', color: '#2563EB' }}>₹{foremanCommission.toLocaleString()}</Text>
-                  </Text>
-                  <Text style={{ fontSize: 13, color: '#334155' }}>
-                    • Distributable Dividend Pool: <Text style={{ fontWeight: '700', color: '#7C3AED' }}>₹{totalDividend.toLocaleString()}</Text>
-                  </Text>
-                  <Text style={{ fontSize: 14, color: '#0F172A', fontWeight: '800', marginTop: 4 }}>
-                    • 💰 Dividend Credit Per Member: <Text style={{ color: '#16A34A' }}>₹{dividendPerMember.toLocaleString()}</Text>
-                  </Text>
-                </View>
+                {calc ? (
+                  <View style={{ gap: 6 }}>
+                    <Text style={{ fontSize: 13, color: '#334155' }}>
+                      • Total Gross Chit Pot Value: <Text style={{ fontWeight: '700' }}>{inr(calc.inputs?.chitValue)}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 13, color: '#334155' }}>
+                      • Winning Bid Discount Given Up: <Text style={{ fontWeight: '700', color: '#D97706' }}>{inr(calc.inputs?.discount)}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 13, color: '#334155' }}>
+                      • Gross Prize Payout To Winner: <Text style={{ fontWeight: '800', color: '#16A34A' }}>{inr(calc.grossPrize)}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 13, color: '#334155' }}>
+                      • Foreman Commission ({calc.inputs?.foremanCommissionPct}%): <Text style={{ fontWeight: '700', color: '#2563EB' }}>{inr(calc.foremanCommission)}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 13, color: '#334155' }}>
+                      • Distributable Dividend Pool: <Text style={{ fontWeight: '700', color: '#7C3AED' }}>{inr(calc.dividendPool)}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A', fontWeight: '800', marginTop: 4 }}>
+                      • 💰 Dividend Credit Per Ticket: <Text style={{ color: '#16A34A' }}>{inr(calc.dividendPerTicket)}</Text>
+                      <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '500' }}>  (pool ÷ {numMembers} seats)</Text>
+                    </Text>
+                    <Text style={{ fontSize: 13, color: '#334155' }}>
+                      • Credited to {calc.inputs?.activeTicketCount} active ticket(s): <Text style={{ fontWeight: '700' }}>{inr(calc.creditedTotal)}</Text>
+                      {calc.nextInstallmentNetDue !== null ? `  → next instalment due ${inr(calc.nextInstallmentNetDue)}` : ''}
+                    </Text>
+                    {calc.pendingDecisionTotal > 0 && (
+                      <Text style={{ fontSize: 13, color: '#B45309' }}>
+                        • Not credited — pending business decision: <Text style={{ fontWeight: '700' }}>{inr(calc.pendingDecisionTotal)}</Text>
+                        {'\n'}
+                        {(calc.allocations || [])
+                          .filter((a: any) => a.status === 'PENDING_DECISION')
+                          .map((a: any) => `   ${a.kind === 'VACANT_SEATS' ? 'Unfilled seats' : a.kind === 'ROUNDING_REMAINDER' ? 'Rounding remainder' : 'Final auction (no next instalment)'}: ${inr(a.amount)}`)
+                          .join('\n')}
+                      </Text>
+                    )}
+                  </View>
+                ) : (
+                  <Text style={{ fontSize: 13, color: '#64748B' }}>Enter a discount to see the calculation.</Text>
+                )}
+                {preview && !preview.valid && (preview.errors || []).length > 0 && (
+                  <View style={{ marginTop: 10, backgroundColor: '#FEF2F2', borderRadius: 8, padding: 10 }}>
+                    {(preview.errors || []).map((e: any, i: number) => (
+                      <Text key={i} style={{ fontSize: 12, color: '#B91C1C', marginBottom: 2 }}>
+                        ⚠️ {e.message}
+                      </Text>
+                    ))}
+                  </View>
+                )}
               </View>
 
-              <Text style={mStyles.label}>Winning Subscriber (Eligible Non-Prized Members) *</Text>
-              <View style={{ maxHeight: 160, marginBottom: 16 }}>
+              <Text style={mStyles.label}>Winning Ticket *</Text>
+              {eligibilityInfo && (
+                <Text style={{ fontSize: 11, color: '#64748B', marginBottom: 6 }}>
+                  {eligibilityInfo.activeTickets} active ticket(s) of {eligibilityInfo.maxMembers} seats • Repeat wins are currently permitted (policy pending decision)
+                </Text>
+              )}
+              <View style={{ maxHeight: 220, marginBottom: 16 }}>
                 <ScrollView nestedScrollEnabled style={{ borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 8 }}>
-                  {enrolledMembers
-                    .filter((m) => !m.isPrized)
-                    .map((m) => (
+                  {enrolledMembers.length === 0 && (
+                    <Text style={{ padding: 10, fontSize: 13, color: '#64748B' }}>No tickets in this group yet.</Text>
+                  )}
+                  {enrolledMembers.map((m: any) => {
+                    const selected = winningSubId === m.subscriberId;
+                    const blocking = (m.reasons || []).filter((r: any) => r.blocking);
+                    return (
                       <TouchableOpacity
-                        key={m.subscriberId}
+                        key={m.memberId}
+                        disabled={!m.eligible}
+                        accessibilityState={{ disabled: !m.eligible, selected }}
                         style={{
                           padding: 10,
-                          backgroundColor: winningSubId === m.subscriberId ? '#DCFCE7' : '#FFF',
+                          backgroundColor: selected ? '#DCFCE7' : m.eligible ? '#FFF' : '#F1F5F9',
                           borderBottomWidth: 1,
                           borderBottomColor: '#F1F5F9',
+                          opacity: m.eligible ? 1 : 0.7,
                         }}
                         onPress={() => setWinningSubId(m.subscriberId)}
                       >
-                        <Text style={{ fontWeight: winningSubId === m.subscriberId ? '700' : '500', color: '#0F172A', fontSize: 13 }}>
-                          Ticket #{m.ticketNo ?? m.ticketNumber}: {m.subscriber?.fullName} [{m.subscriber?.subscriberCode}]
+                        <Text style={{ fontWeight: selected ? '700' : '500', color: '#0F172A', fontSize: 13 }}>
+                          Ticket #{m.ticketNumber}: {m.subscriber?.fullName} [{m.subscriber?.subscriberCode}]
+                          {m.membershipStatus !== 'ACTIVE' ? `  (${m.membershipStatus})` : ''}
                         </Text>
+                        {m.isPrized && (
+                          <Text style={{ fontSize: 11, color: '#B45309', marginTop: 2 }}>
+                            🏆 Already won auction #{(m.prizedInstallmentNos || []).join(', #')}
+                          </Text>
+                        )}
+                        {blocking.length > 0 && (
+                          <Text style={{ fontSize: 11, color: '#B91C1C', marginTop: 2 }}>
+                            ⛔ Not eligible: {blocking.map((r: any) => r.message).join(' ')}
+                          </Text>
+                        )}
                       </TouchableOpacity>
-                    ))}
+                    );
+                  })}
                 </ScrollView>
               </View>
 
               <TouchableOpacity
-                style={[mStyles.primaryBtn, { alignSelf: 'flex-start', paddingVertical: 12, paddingHorizontal: 24 }]}
-                disabled={submitting}
+                style={[mStyles.primaryBtn, { alignSelf: 'flex-start', paddingVertical: 12, paddingHorizontal: 24, opacity: canConfirm ? 1 : 0.5 }]}
+                disabled={!canConfirm}
                 onPress={handleConfirmAuction}
               >
                 {submitting ? (

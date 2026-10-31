@@ -1481,7 +1481,7 @@ export function ChitGroupsTab({ user }: { user: any }) {
                 </View>
 
                 <Text style={{ fontSize: 14, fontWeight: '700', marginBottom: 8, color: '#0F172A' }}>
-                  Enrolled Members ({scheduleData.members?.length ?? scheduleData.memberships?.length ?? 0} / {scheduleData.maxMembers})
+                  Enrolled Members ({scheduleData.activeTickets ?? (scheduleData.members || scheduleData.memberships || []).filter((x: any) => (x.membershipStatus ?? x.status ?? 'ACTIVE') === 'ACTIVE').length} / {scheduleData.maxMembers})
                 </Text>
                 <View style={mStyles.table}>
                   <View style={mStyles.tableHeader}>
@@ -1505,8 +1505,12 @@ export function ChitGroupsTab({ user }: { user: any }) {
                       <Text style={[mStyles.tableCell, { width: 110, fontSize: 12 }]}>
                         {m.subscriber?.phone}
                       </Text>
-                      <Text style={[mStyles.tableCell, { flex: 1, fontSize: 12, color: m.isPrized ? '#16A34A' : '#64748B' }]}>
-                        {m.isPrized ? `PRIZED (Inst #${m.prizedInstallmentNo})` : 'Non-prized (Active bidder)'}
+                      <Text style={[mStyles.tableCell, { flex: 1, fontSize: 12, color: (m.membershipStatus ?? 'ACTIVE') !== 'ACTIVE' ? '#B91C1C' : m.isPrized ? '#16A34A' : '#64748B' }]}>
+                        {(m.membershipStatus ?? 'ACTIVE') !== 'ACTIVE'
+                          ? `${m.membershipStatus}${m.exitedAt ? ` (${String(m.exitedAt).slice(0, 10)})` : ''}${m.isPrized ? ` • was PRIZED (Inst #${m.prizedInstallmentNo})` : ''}`
+                          : m.isPrized
+                          ? `PRIZED (Inst #${(m.prizedInstallmentNos || [m.prizedInstallmentNo]).join(', #')})`
+                          : 'Non-prized (Active bidder)'}
                       </Text>
                     </View>
                   ))}

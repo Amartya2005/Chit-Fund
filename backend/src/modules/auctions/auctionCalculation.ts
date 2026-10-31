@@ -75,7 +75,7 @@ export interface AuctionCalcResult {
   breakdown: CalcStep[];
 }
 
-const inr = (n: number) => `₹${n.toFixed(2)}`;
+const inr = (n: number) => `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export function calculateAuction(input: AuctionCalcInput): AuctionCalcResult {
   const errors: CalcIssue[] = [];

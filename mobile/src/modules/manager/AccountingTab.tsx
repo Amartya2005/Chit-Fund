@@ -11,6 +11,12 @@ import {
 import { api } from '../../services/api';
 import { mStyles } from './commonStyles';
 
+// P0 (E8): figures the backend cannot derive from database records come back as null.
+// Show them as unavailable instead of rendering a fabricated ₹0 or sample value.
+const NOT_AVAILABLE = 'Not available yet';
+const money = (v: number | null | undefined) =>
+  v === null || v === undefined ? NOT_AVAILABLE : `₹${Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+
 export function AccountingTab({ user }: { user: any }) {
   const [subTab, setSubTab] = useState<'CASHBOOK' | 'EXPENSES' | 'REPORTS'>('CASHBOOK');
 
@@ -349,12 +355,17 @@ export function AccountingTab({ user }: { user: any }) {
 
                 <View style={mStyles.kpiCard}>
                   <Text style={mStyles.kpiLabel}>Closing Cash in Hand</Text>
-                  <Text style={[mStyles.kpiVal, { color: '#0F2F52', fontWeight: '900' }]}>
-                    ₹{(cashbook.summary?.closingBalance ?? cashbook.summary?.closingCashInHand ?? 0).toLocaleString()}
+                  <Text style={[mStyles.kpiVal, { color: '#0F2F52', fontWeight: '900', fontSize: cashbook.summary?.closingBalance == null ? 14 : undefined }]}>
+                    {money(cashbook.summary?.closingBalance ?? cashbook.summary?.closingCashInHand)}
                   </Text>
                   <Text style={{ fontSize: 10, color: '#64748B', marginTop: 2 }}>
-                    Opening Float: ₹{(cashbook.summary?.openingBalance || 50000).toLocaleString()}
+                    Opening Float: {money(cashbook.summary?.openingBalance)}
                   </Text>
+                  {cashbook.summary?.openingBalance == null && (
+                    <Text style={{ fontSize: 10, color: '#B45309', marginTop: 2 }}>
+                      Opening cash balance is not recorded yet (needs accounting set-up).
+                    </Text>
+                  )}
                 </View>
               </View>
 
@@ -1024,7 +1035,7 @@ export function AccountingTab({ user }: { user: any }) {
                     <View style={mStyles.tableRow}>
                       <Text style={[mStyles.tableCell, { flex: 1 }]}>Late Fees & Default Charges</Text>
                       <Text style={[mStyles.tableCell, { width: 140, textAlign: 'right', fontWeight: '600', color: '#16A34A' }]}>
-                        ₹{reportsData?.financialStatementsReport?.defaultLateFees?.toLocaleString() || '0'}
+                        {money(reportsData?.financialStatementsReport?.defaultLateFees)}
                       </Text>
                     </View>
                     <View style={[mStyles.tableRow, { backgroundColor: '#F8FAFC' }]}>
@@ -1080,7 +1091,7 @@ export function AccountingTab({ user }: { user: any }) {
                       onPress={() =>
                         handleTriggerExport(
                           'REP-05: Balance Sheet & Net Equity Report',
-                          `Total Assets: ₹${reportsData?.financialStatementsReport?.totalAssets?.toLocaleString() || 0}, Total Liabilities: ₹${reportsData?.financialStatementsReport?.totalLiabilities?.toLocaleString() || 0}, Net Equity: ₹${reportsData?.financialStatementsReport?.equity?.toLocaleString() || 0}.`
+                          `Total Assets: ${money(reportsData?.financialStatementsReport?.totalAssets)}, Total Liabilities: ${money(reportsData?.financialStatementsReport?.totalLiabilities)}, Net Equity: ${money(reportsData?.financialStatementsReport?.equity)}. Balance sheet figures require ledger posting (pending accounting engine).`
                         )
                       }
                     >
@@ -1088,25 +1099,32 @@ export function AccountingTab({ user }: { user: any }) {
                     </TouchableOpacity>
                   </View>
 
+                  {reportsData?.financialStatementsReport?.totalAssets == null && (
+                    <View style={{ backgroundColor: '#FFFBEB', borderColor: '#FCD34D', borderWidth: 1, borderRadius: 8, padding: 10, marginTop: 10 }}>
+                      <Text style={{ fontSize: 12, color: '#92400E' }}>
+                        ⚠️ The balance sheet cannot be produced yet: collections, auctions and payouts are not posted to the accounting ledger. Previously this screen showed sample figures.
+                      </Text>
+                    </View>
+                  )}
                   <View style={{ flexDirection: 'row', gap: 10, marginVertical: 12, flexWrap: 'wrap' }}>
                     <View style={{ flex: 1, minWidth: 120, backgroundColor: '#F8FAFC', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
                       <Text style={{ fontSize: 11, color: '#64748B', fontWeight: '600' }}>TOTAL ASSETS</Text>
                       <Text style={{ fontSize: 18, fontWeight: '800', color: '#0284C7', marginTop: 4 }}>
-                        ₹{reportsData?.financialStatementsReport?.totalAssets?.toLocaleString() || '0'}
+                        {money(reportsData?.financialStatementsReport?.totalAssets)}
                       </Text>
                       <Text style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Cash & Receivables</Text>
                     </View>
                     <View style={{ flex: 1, minWidth: 120, backgroundColor: '#F8FAFC', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
                       <Text style={{ fontSize: 11, color: '#64748B', fontWeight: '600' }}>LIABILITIES</Text>
                       <Text style={{ fontSize: 18, fontWeight: '800', color: '#DC2626', marginTop: 4 }}>
-                        ₹{reportsData?.financialStatementsReport?.totalLiabilities?.toLocaleString() || '0'}
+                        {money(reportsData?.financialStatementsReport?.totalLiabilities)}
                       </Text>
                       <Text style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Payables & Payouts</Text>
                     </View>
                     <View style={{ flex: 1, minWidth: 120, backgroundColor: '#F8FAFC', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
                       <Text style={{ fontSize: 11, color: '#64748B', fontWeight: '600' }}>NET EQUITY</Text>
                       <Text style={{ fontSize: 18, fontWeight: '800', color: '#16A34A', marginTop: 4 }}>
-                        ₹{reportsData?.financialStatementsReport?.equity?.toLocaleString() || '0'}
+                        {money(reportsData?.financialStatementsReport?.equity)}
                       </Text>
                       <Text style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Retained Capital</Text>
                     </View>

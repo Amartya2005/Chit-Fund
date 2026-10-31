@@ -16,6 +16,7 @@ export function ComplianceReportsTab({ user }: { user: any }) {
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [complianceRecords, setComplianceRecords] = useState<any[]>([]);
   const [complianceReports, setComplianceReports] = useState<any>(null);
+  const [demoNotes, setDemoNotes] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
 
@@ -33,48 +34,6 @@ export function ComplianceReportsTab({ user }: { user: any }) {
   const [exportTitle, setExportTitle] = useState('');
   const [exportDesc, setExportDesc] = useState('');
 
-  const generateFallbackAuditLogs = () => [
-    {
-      id: 'audit_stat_1',
-      action: 'SANCTION_ORDER_VERIFIED',
-      entity: 'ChitSchemeSanction',
-      createdAt: new Date().toISOString(),
-      user: { fullName: 'State Nodal Authority' },
-      details: 'Verified Section 4 prior sanction for ongoing company chit schemes.',
-    },
-    {
-      id: 'audit_stat_2',
-      action: 'RESERVE_FUND_DEPOSIT_SEALED',
-      entity: 'SecurityDepositLien',
-      createdAt: new Date(Date.now() - 3600000 * 4).toISOString(),
-      user: { fullName: 'Super Administrator' },
-      details: '100% chit sum security fixed deposit lien confirmed with State Treasury.',
-    },
-    {
-      id: 'audit_stat_3',
-      action: 'AUCTION_MINUTES_FILED',
-      entity: 'AuctionProceeding',
-      createdAt: new Date(Date.now() - 3600000 * 24).toISOString(),
-      user: { fullName: 'Inspection Officer' },
-      details: 'Certified auction minutes with winning bid discount and foreman 5% commission signed.',
-    },
-    {
-      id: 'audit_stat_4',
-      action: 'KYC_AML_BATCH_AUDIT',
-      entity: 'SubscriberRegistry',
-      createdAt: new Date(Date.now() - 3600000 * 48).toISOString(),
-      user: { fullName: 'Compliance Officer' },
-      details: '100% Aadhaar / PAN identity hashes verified with zero high-risk exposure.',
-    },
-    {
-      id: 'audit_stat_5',
-      action: 'BALANCE_SHEET_REGISTRAR_SUBMIT',
-      entity: 'AnnualFinancialReturn',
-      createdAt: new Date(Date.now() - 3600000 * 72).toISOString(),
-      user: { fullName: 'Chief Auditor' },
-      details: 'Statutory Form V audited balance sheet submitted to Registrar of Chits.',
-    },
-  ];
 
   const fetchData = async () => {
     try {
@@ -92,10 +51,9 @@ export function ComplianceReportsTab({ user }: { user: any }) {
       } else if (rawLogs?.logs && Array.isArray(rawLogs.logs)) {
         extractedLogs = rawLogs.logs;
       }
-      if (extractedLogs.length === 0) {
-        extractedLogs = generateFallbackAuditLogs();
-      }
+      // P0: never substitute invented audit entries — an empty audit trail is shown as empty.
       setAuditLogs(extractedLogs);
+      setDemoNotes([...(cRes.data?.dataQuality?.notes || []), ...(rRes.data?.dataQuality?.notes || [])]);
 
       const compList = Array.isArray(cRes.data?.data) ? cRes.data.data : [];
       setComplianceRecords(compList);
@@ -177,6 +135,15 @@ export function ComplianceReportsTab({ user }: { user: any }) {
           <Text style={mStyles.secondaryBtnText}>🔄 Refresh Center</Text>
         </TouchableOpacity>
       </View>
+
+      {demoNotes.length > 0 && (
+        <View style={{ backgroundColor: '#FFFBEB', borderColor: '#FCD34D', borderWidth: 1, borderRadius: 8, padding: 12, marginBottom: 12 }}>
+          <Text style={{ fontSize: 13, fontWeight: '800', color: '#92400E', marginBottom: 4 }}>⚠️ Demonstration data</Text>
+          {Array.from(new Set(demoNotes)).map((n, i) => (
+            <Text key={i} style={{ fontSize: 12, color: '#92400E' }}>• {n}</Text>
+          ))}
+        </View>
+      )}
 
       {/* Compliance Health Banner */}
       <View style={[mStyles.card, { backgroundColor: '#0B192C', borderColor: '#1E3E62', padding: 18, marginBottom: 16 }]}>
