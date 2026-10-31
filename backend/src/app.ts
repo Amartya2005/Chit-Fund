@@ -20,6 +20,7 @@ import * as superAdminController from './modules/super-admin/superAdmin.controll
 import * as accountingController from './modules/accounting/accounting.controller.js';
 import * as notificationController from './modules/notifications/notification.controller.js';
 import * as khataController from './modules/khata/khata.controller.js';
+import * as policyController from './modules/financial-policies/policy.controller.js';
 
 const app = express();
 
@@ -166,6 +167,17 @@ router.post('/auctions/preview', authenticateToken, requireRoles('SUPER_ADMIN', 
 router.get('/auctions/dividend-allocations/pending', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), auctionController.listPendingDividendAllocations);
 router.get('/auctions/group/:groupId/eligibility', authenticateToken, auctionController.getGroupEligibility);
 router.get('/auctions/group/:groupId', authenticateToken, auctionController.getGroupAuctions);
+
+// Configuration system (P2): policy versions, effective settings, snapshots
+router.get('/financial-policies/templates', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.listTemplates);
+router.get('/financial-policies/effective', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER', 'COLLECTION_STAFF'), policyController.getEffective);
+router.get('/financial-policies/snapshots', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.listSnapshots);
+router.get('/financial-policies', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.listVersions);
+router.get('/financial-policies/:id', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.getVersion);
+router.post('/financial-policies', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.createVersion);
+router.post('/financial-policies/:id/validate', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.validateVersion);
+router.post('/financial-policies/:id/activate', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.activateVersion);
+router.post('/financial-policies/:id/reject', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.rejectVersion);
 
 // Payout & Refund Routes (AC-26, AC-27, AC-28)
 router.get('/payouts', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), payoutController.listPayouts);

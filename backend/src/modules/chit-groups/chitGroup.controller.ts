@@ -663,6 +663,16 @@ export const deleteChitGroup = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // P2: group-level financial settings are kept permanently (append-only history).
+    const policyVersions = await prisma.financialPolicyVersion.count({ where: { groupId: id } });
+    if (policyVersions > 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'FINANCIAL_CONFIG_HISTORY',
+        message: `Cannot delete chit group '${group.name}' because it has ${policyVersions} financial setting version(s). Please set its status to CLOSED instead.`,
+      });
+    }
+
     await prisma.chitGroupMember.deleteMany({ where: { groupId: id } });
     await prisma.installmentSchedule.deleteMany({ where: { groupId: id } });
     await prisma.chitGroup.delete({ where: { id } });

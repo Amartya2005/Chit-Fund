@@ -450,6 +450,19 @@ export const deleteCompany = async (req: AuthRequest, res: Response) => {
     const isHardDelete = req.query.permanent === 'true' || req.query.hard === 'true';
 
     if (isHardDelete) {
+      // P2: financial configuration history (policy versions, snapshots) is append-only and
+      // is never purged. Refuse before touching anything; soft delete remains available.
+      const [policyVersions, snapshots] = await Promise.all([
+        prisma.financialPolicyVersion.count({ where: { companyId: id } }),
+        prisma.configSnapshot.count({ where: { companyId: id } }),
+      ]);
+      if (policyVersions + snapshots > 0) {
+        return res.status(409).json({
+          success: false,
+          code: 'FINANCIAL_CONFIG_HISTORY',
+          message: 'This company has financial configuration history (policy versions or snapshots), which is kept permanently. Use a normal (soft) delete instead.',
+        });
+      }
       // Hard delete: cascade with defensive handling so missing columns or relations do not crash
       await prisma.$transaction(async (tx) => {
         const chitGroups = await tx.chitGroup.findMany({ where: { companyId: id }, select: { id: true } });

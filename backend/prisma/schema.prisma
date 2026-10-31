@@ -37,6 +37,12 @@ model Company {
   expenses       Expense[]
   businesses     Business[]
   sequences      CompanySequence[]
+
+  // P2 configuration system. engineEnabled is an inert flag until engine groups exist (P5).
+  engineEnabled   Boolean                  @default(false)
+  policyVersions  FinancialPolicyVersion[]
+  policyPointers  PolicyPointer[]
+  configSnapshots ConfigSnapshot[]
 }
 
 model User {
@@ -74,6 +80,10 @@ model User {
   assignedBusinesses        BusinessStaff[]    @relation("StaffAssignedBusinesses")
   createdKhataCustomers     KhataCustomer[]    @relation("CustomerCreator")
   recordedKhataTransactions KhataTransaction[] @relation("KhataTxRecorder")
+
+  createdPolicyVersions FinancialPolicyVersion[] @relation("PolicyCreatedBy")
+  decidedPolicyVersions FinancialPolicyVersion[] @relation("PolicyDecidedBy")
+  lockedConfigSnapshots ConfigSnapshot[]         @relation("SnapshotLockedBy")
 
   @@index([companyId, role])
 }
@@ -149,6 +159,10 @@ model ChitGroup {
   transactions     PaymentTransaction[]
   auctions         Auction[]
   refunds          Refund[]
+
+  // P2: "LEGACY" groups keep the existing workflow; engine groups arrive with P5 (D-32).
+  engineVersion  String                   @default("LEGACY")
+  policyVersions FinancialPolicyVersion[]
 
   @@unique([companyId, groupCode])
   @@index([companyId, status])
@@ -603,4 +617,109 @@ model CompanySequence {
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@id([companyId, key])
+}
+
+// ---------------------------------------------------------------------------
+// P2 — Configuration system (docs/auction-engine/DATABASE_DESIGN.md §3, migration M1)
+// Append-only: versions are never edited after leaving DRAFT; activation moves the
+// PolicyPointer. Snapshots are frozen copies of the resolved configuration.
+// ---------------------------------------------------------------------------
+
+enum PolicyScope {
+  COMPANY
+  GROUP
+  AUCTION
+}
+
+enum PolicyKind {
+  CHIT_ECONOMICS
+  AUCTION_RULES
+  BIDDING
+  DIVIDEND
+  CONTRIBUTION
+  PENALTY
+  DEFAULT_HANDLING
+  ELIGIBILITY
+  SETTLEMENT
+  SCHEDULING
+  ROUNDING
+  INTEREST_PRODUCT
+  LEGAL_LIMITS
+}
+
+enum PolicyStatus {
+  DRAFT
+  ACTIVE
+  SUPERSEDED
+  REJECTED
+}
+
+model FinancialPolicyVersion {
+  id            String       @id @default(uuid())
+  companyId     String
+  scope         PolicyScope
+  /// "COMPANY" | "GROUP:<groupId>" (AUCTION scope arrives with auction sessions, P5). Never NULL.
+  scopeKey      String
+  groupId       String?
+  kind          PolicyKind
+  version       Int
+  schemaVersion Int
+  values        Json
+  status        PolicyStatus @default(DRAFT)
+  reason        String?
+  decisionNote  String?
+  createdById   String
+  /// user who activated or rejected the version
+  decidedById   String?
+  createdAt     DateTime     @default(now())
+  activatedAt   DateTime?
+  supersededAt  DateTime?
+  rejectedAt    DateTime?
+
+  company   Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  group     ChitGroup?     @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  createdBy User           @relation("PolicyCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  decidedBy User?          @relation("PolicyDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict)
+  pointer   PolicyPointer?
+
+  @@unique([companyId, scopeKey, kind, version])
+  @@index([companyId, kind, status])
+  @@index([groupId])
+  @@index([createdById])
+  @@index([decidedById])
+}
+
+model PolicyPointer {
+  companyId String
+  scopeKey  String
+  kind      PolicyKind
+  versionId String     @unique
+  updatedAt DateTime   @updatedAt
+
+  company Company                @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  version FinancialPolicyVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+
+  @@id([companyId, scopeKey, kind])
+}
+
+model ConfigSnapshot {
+  id            String   @id @default(uuid())
+  companyId     String
+  /// "AUCTION_SESSION" | "INTEREST_ACCOUNT" | "GROUP_ACTIVATION"
+  subjectType   String
+  subjectId     String
+  resolved      Json
+  sources       Json
+  engineVersion String
+  /// sha256 of the canonical JSON of `resolved`
+  hash          String
+  lockedAt      DateTime @default(now())
+  lockedById    String?
+
+  company  Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  lockedBy User?   @relation("SnapshotLockedBy", fields: [lockedById], references: [id], onDelete: Restrict)
+
+  @@unique([subjectType, subjectId])
+  @@index([companyId, lockedAt])
+  @@index([lockedById])
 }
