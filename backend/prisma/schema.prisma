@@ -39,10 +39,15 @@ model Company {
   sequences      CompanySequence[]
 
   // P2 configuration system. engineEnabled is an inert flag until engine groups exist (P5).
-  engineEnabled   Boolean                  @default(false)
-  policyVersions  FinancialPolicyVersion[]
-  policyPointers  PolicyPointer[]
-  configSnapshots ConfigSnapshot[]
+  engineEnabled     Boolean                  @default(false)
+  // P4: ledger posting starts at this business date (D-19); null = automatic posting off
+  ledgerCutoverDate String?
+  accountMappings   AccountMapping[]
+  financialEvents   FinancialEvent[]
+  financialPeriods  FinancialPeriod[]
+  policyVersions    FinancialPolicyVersion[]
+  policyPointers    PolicyPointer[]
+  configSnapshots   ConfigSnapshot[]
 }
 
 model User {
@@ -458,8 +463,9 @@ model Account {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  company Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  lines   JournalEntryLine[]
+  company  Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lines    JournalEntryLine[]
+  mappings AccountMapping[]
 
   @@unique([companyId, code])
 }
@@ -477,6 +483,11 @@ model JournalEntry {
   company Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
   lines   JournalEntryLine[]
 
+  // P4: automatic postings link to their source event; reversals link to the entry they reverse
+  sourceEventId String?         @unique
+  reversalOfId  String?         @unique
+  sourceEvent   FinancialEvent? @relation("EventJournal", fields: [sourceEventId], references: [id], onDelete: Restrict)
+
   @@unique([companyId, entryNo])
   @@index([companyId, date])
 }
@@ -488,12 +499,17 @@ model JournalEntryLine {
   type           String // DEBIT, CREDIT
   amount         Decimal @db.Decimal(15, 2)
   description    String?
+  // P4 dimensions (instead of one account per group / subscriber)
+  groupId        String?
+  subscriberId   String?
 
   journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
   account      Account      @relation(fields: [accountId], references: [id])
 
   @@index([journalEntryId])
   @@index([accountId])
+  @@index([groupId])
+  @@index([subscriberId])
 }
 
 model Refund {
@@ -867,4 +883,77 @@ model EngineConversion {
   convertedBy User      @relation(fields: [convertedById], references: [id], onDelete: Restrict)
 
   @@index([convertedById])
+}
+
+// ---------------------------------------------------------------------------
+// P4 — Accounting integration (migration M3). Domain changes record a FinancialEvent in the same
+// transaction; the posting engine turns it into one balanced JournalEntry when the company has a
+// ledger cut-over date, a complete account mapping and the period is open. Otherwise the event is
+// kept NOT_POSTED with the reason (never silently dropped).
+// ---------------------------------------------------------------------------
+
+model AccountMapping {
+  companyId   String
+  /// CASH, BANK, SUBSCRIBER_RECEIVABLE, SUBSCRIBER_ADVANCE, CHIT_POOL_PAYABLE, PRIZE_PAYABLE, ...
+  role        String
+  accountId   String
+  updatedById String
+  updatedAt   DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@id([companyId, role])
+  @@index([accountId])
+}
+
+model FinancialEvent {
+  id                String    @id @default(uuid())
+  companyId         String
+  type              String
+  sourceType        String
+  sourceId          String
+  idempotencyKey    String
+  /// business date YYYY-MM-DD
+  occurredOn        String
+  amount            Decimal   @db.Decimal(15, 2)
+  payload           Json
+  groupId           String?
+  subscriberId      String?
+  /// POSTED | NOT_POSTED
+  postingStatus     String    @default("NOT_POSTED")
+  notPostedReason   String?
+  rulesVersion      String
+  reversalOfEventId String?   @unique
+  createdAt         DateTime  @default(now())
+  postedAt          DateTime?
+
+  company      Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  journalEntry JournalEntry?   @relation("EventJournal")
+  reversalOf   FinancialEvent? @relation("EventReversal", fields: [reversalOfEventId], references: [id], onDelete: Restrict)
+  reversedBy   FinancialEvent? @relation("EventReversal")
+
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, type, occurredOn])
+  @@index([companyId, postingStatus])
+  @@index([sourceType, sourceId])
+}
+
+/// Accounting periods with a posting lock (replaces the audit-log-only "close" — D-20).
+model FinancialPeriod {
+  id         String    @id @default(uuid())
+  companyId  String
+  name       String
+  startDate  String
+  endDate    String
+  /// OPEN | CLOSED
+  status     String    @default("OPEN")
+  closedById String?
+  closedAt   DateTime?
+  createdAt  DateTime  @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, startDate])
+  @@index([companyId, status])
 }

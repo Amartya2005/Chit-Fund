@@ -48,6 +48,7 @@ export const ENGINE_DECIMAL_MODELS: readonly string[] = [
   'PaymentAllocation',
   'PenaltyCharge',
   'FinancialAdjustment',
+  'FinancialEvent',
 ];
 
 function createClient() {

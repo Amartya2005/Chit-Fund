@@ -3,6 +3,7 @@ import { AppTransactionClient } from '../../config/prisma.js';
 import { D, round } from '../../finance/decimal.js';
 import { addDays, dec, lockGroupRow, requireDecisions } from '../common.js';
 import { contributionOutstanding } from './dues.service.js';
+import { recordEvent } from '../accounting/events.service.js';
 
 /**
  * Penalty run for one engine group (decision D-22 → PENALTY policy; L-10 legality unconfirmed).
@@ -31,6 +32,18 @@ export async function runPenalties(tx: AppTransactionClient, group: { id: string
     });
     if (inserted.count === 0) continue;
     await tx.memberDue.update({ where: { id: d.id }, data: { penaltyAmount: { increment: amount.toFixed(2) } } });
+    await recordEvent(tx, {
+      companyId: group.companyId,
+      type: 'PENALTY_CHARGED',
+      sourceType: 'PenaltyCharge',
+      sourceId: chargeKey,
+      idempotencyKey: `PENALTY_CHARGED:${chargeKey}`,
+      occurredOn: asOf,
+      amount: amount.toFixed(2),
+      payload: { amount: amount.toFixed(2), periodNo: d.periodNo, dueId: d.id },
+      groupId: group.id,
+      subscriberId: d.subscriberId,
+    });
     charged.push({ dueId: d.id, periodNo: d.periodNo, amount: amount.toFixed(2) });
   }
   await tx.auditLog.create({

@@ -541,6 +541,12 @@ export const createJournalEntry = async (req: AuthRequest, res: Response) => {
 
     const entryDate = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : new Date().toISOString().split('T')[0];
 
+    // P4: closed accounting periods accept no entries (also enforced by a database trigger).
+    const closedPeriod = await prisma.financialPeriod.findFirst({ where: { companyId, status: 'CLOSED', startDate: { lte: entryDate }, endDate: { gte: entryDate } } });
+    if (closedPeriod) {
+      return res.status(409).json({ success: false, code: 'PERIOD_CLOSED', message: `The accounting period ${closedPeriod.name} is closed.` });
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       // Journal numbers are allocated atomically per company (previously the last 6 digits of a timestamp).
       let entryNo: string;

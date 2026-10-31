@@ -3,6 +3,7 @@ import { HttpError } from '../../lib/http.js';
 import { D } from '../../finance/decimal.js';
 import { dec, requireDecisions } from '../common.js';
 import { dueOutstanding } from './dues.service.js';
+import { istDate, recordEvent } from '../accounting/events.service.js';
 
 /**
  * Waivers (maker–checker per SETTLEMENT.adjustmentApproval, decision D-14).
@@ -12,9 +13,21 @@ import { dueOutstanding } from './dues.service.js';
  */
 export type AdjustmentType = 'PENALTY_WAIVER' | 'DUE_WAIVER';
 
-async function applyToDue(tx: AppTransactionClient, dueId: string, type: AdjustmentType, amount: InstanceType<typeof D>) {
+async function applyToDue(tx: AppTransactionClient, dueId: string, type: AdjustmentType, amount: InstanceType<typeof D>, adjustmentKey: string) {
   await tx.$queryRaw`SELECT "id" FROM "MemberDue" WHERE "id" = ${dueId} FOR UPDATE`;
   const due = await tx.memberDue.findUniqueOrThrow({ where: { id: dueId } });
+  await recordEvent(tx, {
+    companyId: due.companyId,
+    type: type === 'PENALTY_WAIVER' ? 'PENALTY_WAIVED' : 'DUE_WAIVED',
+    sourceType: 'FinancialAdjustment',
+    sourceId: adjustmentKey,
+    idempotencyKey: `${type}:${adjustmentKey}`,
+    occurredOn: istDate(new Date()),
+    amount: amount.toFixed(2),
+    payload: { amount: amount.toFixed(2), periodNo: due.periodNo, dueId: due.id },
+    groupId: due.groupId,
+    subscriberId: due.subscriberId,
+  });
   if (type === 'PENALTY_WAIVER') {
     const waivable = dec(due.penaltyAmount).minus(dec(due.penaltyWaived));
     if (amount.greaterThan(waivable)) throw new HttpError(422, `Only ${waivable.toFixed(2)} of penalty can be waived on this due.`, 'WAIVER_TOO_LARGE');
@@ -34,8 +47,7 @@ export async function requestAdjustment(
   const eff = await requireDecisions(tx, args.companyId, args.groupId, ['settlement.adjustmentApproval']);
   const amount = new D(args.amount);
   const immediate = eff.values.settlement.adjustmentApproval === 'NONE';
-  if (immediate) await applyToDue(tx, args.dueId, args.type, amount);
-  else {
+  if (!immediate) {
     // validate the size now too (re-checked at approval)
     const due = await tx.memberDue.findUniqueOrThrow({ where: { id: args.dueId } });
     const max = args.type === 'PENALTY_WAIVER' ? dec(due.penaltyAmount).minus(dec(due.penaltyWaived)) : dueOutstanding(due);
@@ -55,6 +67,7 @@ export async function requestAdjustment(
       ...(immediate ? { decidedById: args.userId, decidedAt: now, decisionNote: 'applied directly (adjustmentApproval = NONE)' } : {}),
     },
   });
+  if (immediate) await applyToDue(tx, args.dueId, args.type, amount, adj.id);
   await tx.auditLog.create({
     data: { companyId: args.companyId, userId: args.userId, action: immediate ? 'ADJUSTMENT_APPLIED' : 'ADJUSTMENT_REQUESTED', entity: 'FinancialAdjustment', entityId: adj.id, details: JSON.stringify({ ...args, userId: undefined }) },
   });
@@ -66,7 +79,7 @@ export async function decideAdjustment(tx: AppTransactionClient, id: string, dec
   const adj = await tx.financialAdjustment.findUniqueOrThrow({ where: { id } });
   if (adj.status !== 'REQUESTED') throw new HttpError(409, `This adjustment is already ${adj.status.toLowerCase()}.`, 'INVALID_STATE');
   if (adj.requestedById === userId) throw new HttpError(403, 'A second person must approve or reject this adjustment.', 'SAME_PERSON');
-  if (decision === 'APPROVE') await applyToDue(tx, adj.dueId, adj.type as AdjustmentType, dec(adj.amount));
+  if (decision === 'APPROVE') await applyToDue(tx, adj.dueId, adj.type as AdjustmentType, dec(adj.amount), adj.id);
   const updated = await tx.financialAdjustment.update({
     where: { id },
     data: { status: decision === 'APPROVE' ? 'APPLIED' : 'REJECTED', decidedById: userId, decidedAt: new Date(), decisionNote: note },
