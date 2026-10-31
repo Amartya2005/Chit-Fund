@@ -254,32 +254,7 @@ export function resolveConfiguration(layers: PolicyLayer[], group: GroupFacts | 
   const modelAComplete = !missing.some((m) => MODEL_A.test(m));
   let policy: ChitPolicy | null = null;
   if (modelAComplete && !violations.some((v) => v.code === 'POLICY_INCONSISTENT')) {
-    const candidate: ChitPolicy = {
-      policyVersion: 1,
-      name: 'RESOLVED',
-      commission: {
-        basis: c.basis,
-        ...(c.basis === 'FIXED_AMOUNT' ? { fixedAmount: c.fixedAmount } : { ratePercent: c.ratePercent }),
-        source: c.source,
-        rounding: c.rounding,
-        whenDiscountBelowCommission: c.whenDiscountBelowCommission,
-      },
-      discount: {
-        ...(dmin ? { min: dmin } : {}),
-        ...(dmax ? { max: dmax } : {}),
-        ...(values.discount.step ? { step: values.discount.step } : {}),
-      },
-      dividend: {
-        divisor: dv.divisor,
-        ...(dv.divisor === 'ACTIVE_NON_PRIZED_TICKETS' ? { winnerSharesCurrentDividend: dv.winnerSharesCurrentDividend } : {}),
-        unallocatedDestination: dv.unallocatedDestination,
-        timing: dv.timing,
-      },
-      contribution: { rounding: values.contribution.rounding, differenceHandling: values.contribution.differenceHandling },
-      ...(legalMaxD || legalMaxF !== undefined
-        ? { legalLimits: { ...(legalMaxD ? { maxDiscount: legalMaxD } : {}), ...(legalMaxF !== undefined ? { maxCommissionPercentOfChit: legalMaxF } : {}) } }
-        : {}),
-    };
+    const candidate = chitPolicyFromValues(values);
     try {
       policy = validatePolicy(candidate);
     } catch (e) {
@@ -313,4 +288,43 @@ const issueKey = (i: ConfigIssue) => `${i.groupId ?? 'COMPANY'}|${i.code}|${i.pa
 export function newViolations(before: ConfigIssue[], after: ConfigIssue[]): ConfigIssue[] {
   const seen = new Set(before.map(issueKey));
   return after.filter((v) => !seen.has(issueKey(v)));
+}
+
+/**
+ * Build the P1 engine policy from resolved values (also used to rebuild the policy from a frozen
+ * ConfigSnapshot at settlement time). Callers validate it with validatePolicy.
+ */
+export function chitPolicyFromValues(values: ResolvedValues): ChitPolicy {
+  const c = values.commission;
+  const dv = values.dividend;
+  const dmin = values.discount.min as Bound | null | undefined;
+  const dmax = values.discount.max as Bound | null | undefined;
+  const legalMaxD = values.legalLimits.maxDiscount as Bound | undefined;
+  const legalMaxF = values.legalLimits.maxCommissionPercentOfChit as string | undefined;
+  return {
+    policyVersion: 1,
+    name: 'RESOLVED',
+    commission: {
+      basis: c.basis,
+      ...(c.basis === 'FIXED_AMOUNT' ? { fixedAmount: c.fixedAmount } : { ratePercent: c.ratePercent }),
+      source: c.source,
+      rounding: c.rounding,
+      whenDiscountBelowCommission: c.whenDiscountBelowCommission,
+    },
+    discount: {
+      ...(dmin ? { min: dmin } : {}),
+      ...(dmax ? { max: dmax } : {}),
+      ...(values.discount.step ? { step: values.discount.step } : {}),
+    },
+    dividend: {
+      divisor: dv.divisor,
+      ...(dv.divisor === 'ACTIVE_NON_PRIZED_TICKETS' ? { winnerSharesCurrentDividend: dv.winnerSharesCurrentDividend } : {}),
+      unallocatedDestination: dv.unallocatedDestination,
+      timing: dv.timing,
+    },
+    contribution: { rounding: values.contribution.rounding, differenceHandling: values.contribution.differenceHandling },
+    ...(legalMaxD || legalMaxF !== undefined
+      ? { legalLimits: { ...(legalMaxD ? { maxDiscount: legalMaxD } : {}), ...(legalMaxF !== undefined ? { maxCommissionPercentOfChit: legalMaxF } : {}) } }
+      : {}),
+  };
 }

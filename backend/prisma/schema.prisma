@@ -86,6 +86,9 @@ model User {
   createdKhataCustomers     KhataCustomer[]    @relation("CustomerCreator")
   recordedKhataTransactions KhataTransaction[] @relation("KhataTxRecorder")
 
+  createdSchedules      AuctionSchedule[]        @relation("ScheduleCreatedBy")
+  submittedSettlements  AuctionSettlement[]      @relation("SettlementSubmittedBy")
+  approvedSettlements   AuctionSettlement[]      @relation("SettlementApprovedBy")
   requestedAdjustments  FinancialAdjustment[]    @relation("AdjustmentRequestedBy")
   decidedAdjustments    FinancialAdjustment[]    @relation("AdjustmentDecidedBy")
   engineConversions     EngineConversion[]
@@ -176,6 +179,10 @@ model ChitGroup {
   contributionPeriods ContributionPeriod[]
   memberDues          MemberDue[]
   engineConversion    EngineConversion?
+
+  // P5: schedules and auction sessions
+  auctionSchedules AuctionSchedule[]
+  auctionSessions  AuctionSession[]
 
   @@unique([companyId, groupCode])
   @@index([companyId, status])
@@ -956,4 +963,205 @@ model FinancialPeriod {
 
   @@unique([companyId, startDate])
   @@index([companyId, status])
+}
+
+// ---------------------------------------------------------------------------
+// P5 — Auction schedules, sessions and settlements (migration M4). Engine groups only.
+// Times: opensAt/closesAt are instants (UTC); scheduledDate/occurrenceKey are IST business dates.
+// The legacy Auction/Payout rows created at settlement are projections of AuctionSettlement.
+// ---------------------------------------------------------------------------
+
+model AuctionSchedule {
+  id               String    @id @default(uuid())
+  companyId        String
+  groupId          String
+  /// DAILY | WEEKLY | MONTHLY_BY_DAY | MONTHLY_BY_WEEKDAY | EXPLICIT_DATES
+  frequency        String
+  interval         Int       @default(1)
+  byWeekdays       Int[]
+  byMonthDays      Int[]
+  byWeekdayOrdinal Int?
+  explicitDates    String[]
+  startDate        String
+  endDate          String?
+  maxOccurrences   Int?
+  opensAtLocal     String
+  closesAtLocal    String
+  /// SKIP | NEXT_BUSINESS_DAY | PREVIOUS_BUSINESS_DAY | IGNORE
+  holidayPolicy    String
+  weeklyOffDays    Int[]
+  /// ACTIVE | ENDED
+  status           String    @default("ACTIVE")
+  generatedUntil   String?
+  createdById      String
+  createdAt        DateTime  @default(now())
+  endedAt          DateTime?
+
+  group     ChitGroup        @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  createdBy User             @relation("ScheduleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  sessions  AuctionSession[]
+
+  @@index([companyId, status])
+  @@index([groupId])
+  @@index([createdById])
+}
+
+model Holiday {
+  id        String   @id @default(uuid())
+  companyId String
+  date      String
+  name      String
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, date])
+}
+
+model AuctionSession {
+  id               String    @id @default(uuid())
+  companyId        String
+  groupId          String
+  scheduleId       String?
+  /// original planned date (stable identity of a scheduled occurrence; postponement keeps it)
+  occurrenceKey    String?
+  sequenceNo       Int
+  scheduledDate    String
+  opensAt          DateTime
+  closesAt         DateTime
+  extendedUntil    DateTime?
+  extensions       Int       @default(0)
+  /// OFFLINE | ONLINE | HYBRID
+  mode             String
+  /// SCHEDULED | OPEN | CLOSED | PENDING_APPROVAL | SETTLED | CANCELLED | NO_BID
+  status           String    @default("SCHEDULED")
+  configSnapshotId String?   @unique
+  resultAuctionId  String?   @unique
+  statusReason     String?
+  lastEventSeq     Int       @default(0)
+  bestBidId        String?
+  rowVersion       Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  group       ChitGroup           @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  schedule    AuctionSchedule?    @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  settlements AuctionSettlement[]
+
+  @@unique([scheduleId, occurrenceKey])
+  @@unique([groupId, sequenceNo])
+  @@index([companyId, status, opensAt])
+  @@index([groupId, scheduledDate])
+}
+
+/// Reproducibility record of an engine calculation (inputs, policy, outputs and their hashes).
+model CalculationRun {
+  id               String   @id @default(uuid())
+  companyId        String
+  engine           String
+  kind             String
+  engineVersion    String
+  configSnapshotId String?
+  inputs           Json
+  policy           Json
+  outputs          Json
+  inputHash        String
+  policyHash       String
+  outputHash       String
+  createdById      String?
+  createdAt        DateTime @default(now())
+
+  settlement AuctionSettlement?
+
+  @@index([companyId, kind, createdAt])
+}
+
+model AuctionSettlement {
+  id                  String    @id @default(uuid())
+  companyId           String
+  groupId             String
+  sessionId           String
+  revision            Int
+  calculationRunId    String    @unique
+  winnerMemberId      String
+  winnerSubscriberId  String
+  winningDiscount     Decimal   @db.Decimal(15, 2)
+  commission          Decimal   @db.Decimal(15, 2)
+  commissionShortfall Decimal   @db.Decimal(15, 2)
+  dividendPool        Decimal   @db.Decimal(15, 2)
+  dividendPerShare    Decimal   @db.Decimal(15, 2)
+  roundingRemainder   Decimal   @db.Decimal(15, 2)
+  dividendCredited    Decimal   @db.Decimal(15, 2)
+  dividendUnallocated Decimal   @db.Decimal(15, 2)
+  grossPrize          Decimal   @db.Decimal(15, 2)
+  deductions          Decimal   @db.Decimal(15, 2)
+  netPrize            Decimal   @db.Decimal(15, 2)
+  targetPeriodNo      Int?
+  /// PENDING_APPROVAL | SETTLED | REJECTED | REVERSED
+  status              String
+  submittedById       String
+  approvedById        String?
+  decisionNote        String?
+  settledAt           DateTime?
+  auctionId           String?   @unique
+  reversedAt          DateTime?
+  reversedById        String?
+  reversalReason      String?
+  createdAt           DateTime  @default(now())
+
+  session        AuctionSession   @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  calculationRun CalculationRun   @relation(fields: [calculationRunId], references: [id], onDelete: Restrict)
+  submittedBy    User             @relation("SettlementSubmittedBy", fields: [submittedById], references: [id], onDelete: Restrict)
+  approvedBy     User?            @relation("SettlementApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict)
+  dividends      DividendRecord[]
+
+  @@unique([sessionId, revision])
+  @@index([companyId, status, settledAt])
+  @@index([groupId, status])
+  @@index([submittedById])
+  @@index([approvedById])
+}
+
+/// Every paisa of a settlement's dividend pool (ticket shares, vacant seats, remainder, ...).
+model DividendRecord {
+  id             String    @id @default(uuid())
+  companyId      String
+  settlementId   String
+  key            String
+  kind           String
+  /// CREDIT_TO_PERIOD | PAYABLE_IN_CASH | PENDING_DECISION | ROUNDING_RESERVE
+  status         String
+  amount         Decimal   @db.Decimal(15, 2)
+  memberId       String?
+  subscriberId   String?
+  targetPeriodNo Int?
+  appliedDueId   String?
+  reversedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  settlement AuctionSettlement @relation(fields: [settlementId], references: [id], onDelete: Restrict)
+
+  @@unique([settlementId, key])
+  @@index([companyId, status])
+  @@index([memberId])
+}
+
+// ---------------------------------------------------------------------------
+// P6 — Eligibility decisions (migration M4b). Evaluations at session open and on demand;
+// overrides (overridable rules only, with a reason) are separate rows, never edits.
+// ---------------------------------------------------------------------------
+
+model EligibilityDecision {
+  id              String   @id @default(uuid())
+  companyId       String
+  sessionId       String
+  memberId        String
+  eligible        Boolean
+  results         Json
+  configHash      String
+  overriddenById  String?
+  overriddenRules String[]
+  overrideReason  String?
+  evaluatedAt     DateTime @default(now())
+
+  @@index([sessionId, memberId])
+  @@index([companyId, evaluatedAt])
 }

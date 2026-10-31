@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import { guardEnginePayoutUpdate, onPrizeDisbursed } from '../../engine/sessions/payoutHooks.js';
 import { onTicketExited } from '../../engine/dues/ticketHooks.js';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
@@ -71,6 +72,9 @@ export const updatePayoutStatus = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: `Payout is already ${payout.status} and can no longer be changed.` });
     }
 
+    // Engine groups (P5): deductions are fixed by the settlement; payouts are never rejected.
+    await guardEnginePayoutUpdate(prisma, payout, status, deductions);
+
     let newDeductions = payout.deductions;
     if (deductions !== undefined && deductions !== null && deductions !== '') {
       const parsed = parsePositiveAmount(deductions, { allowZero: true });
@@ -82,18 +86,23 @@ export const updatePayoutStatus = async (req: AuthRequest, res: Response) => {
     const netPayoutAmount = subtractMoney(payout.grossBidAmount, newDeductions);
 
     // Conditional update: a payout cannot be finalised twice by concurrent requests.
-    const result = await prisma.payout.updateMany({
-      where: { id, status: { notIn: FINAL_STATES } },
-      data: {
-        status,
-        deductions: newDeductions,
-        netPayoutAmount,
-        paymentMode: paymentMode || payout.paymentMode,
-        transactionRef: transactionRef ? String(transactionRef).slice(0, 200) : payout.transactionRef,
-        approvedByUserId: status === 'APPROVED' || status === 'DISBURSED' ? userId : payout.approvedByUserId,
-        approvedAt: status === 'APPROVED' ? new Date() : payout.approvedAt,
-        disbursedAt: status === 'DISBURSED' ? new Date() : payout.disbursedAt,
-      },
+    const result = await prisma.$transaction(async (tx) => {
+      const r = await tx.payout.updateMany({
+        where: { id, status: { notIn: FINAL_STATES } },
+        data: {
+          status,
+          deductions: newDeductions,
+          netPayoutAmount,
+          paymentMode: paymentMode || payout.paymentMode,
+          transactionRef: transactionRef ? String(transactionRef).slice(0, 200) : payout.transactionRef,
+          approvedByUserId: status === 'APPROVED' || status === 'DISBURSED' ? userId : payout.approvedByUserId,
+          approvedAt: status === 'APPROVED' ? new Date() : payout.approvedAt,
+          disbursedAt: status === 'DISBURSED' ? new Date() : payout.disbursedAt,
+        },
+      });
+      // Engine groups (P5): record the disbursement and settle deducted dues in the same transaction.
+      if (r.count === 1 && status === 'DISBURSED') await onPrizeDisbursed(tx, id, userId || null);
+      return r;
     });
     if (result.count === 0) {
       return res.status(409).json({ success: false, message: 'Payout was updated by another request. Please refresh.' });

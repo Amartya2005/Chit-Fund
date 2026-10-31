@@ -96,4 +96,12 @@ export const env = {
   rateLimit: {
     enabled: optional('RATE_LIMIT_ENABLED', isTest ? 'false' : 'true') !== 'false',
   },
+  /**
+   * Shared secret for the external scheduler (cron) calling POST /engine/scheduler/run with the
+   * X-Cron-Secret header. Empty = the endpoint is available only to signed-in managers (own company).
+   */
+  cronSecret: optional('CRON_SECRET'),
 };
+if (env.cronSecret && env.cronSecret.length < 32) {
+  throw new Error('[config] CRON_SECRET must be at least 32 characters.');
+}
