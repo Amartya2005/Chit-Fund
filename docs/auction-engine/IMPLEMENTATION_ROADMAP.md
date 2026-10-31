@@ -30,6 +30,15 @@ Indicative sizing (single experienced full-stack developer, excluding decision l
 
 Critical path for **offline configurable auctions with daily/weekly/monthly schedules**: P0 → P1 → P2 → P3 → P4 → P5 → P6.
 
+### P1 status — library complete (branch `claude/p1-finance-engine`)
+
+* Delivered: `backend/src/finance/` (pure, engine `1.0.0`) — decimal & rounding, breakdown recorder, canonical calculation records, Model A policy/contribution/auction (A1 and A2)/dues & payment allocation/aligned-group lifecycle. See FINANCIAL_ENGINE §1.1.
+* Not wired into any endpoint; existing API behaviour is unchanged (P0 `calculateAuction` still computes settlements). Wiring happens when P2 provides persisted, approved policies.
+* Tests: 63 new (32 golden, 15 property over 5 seeds, 6 parity incl. 10,000 random inputs, 10 primitives); full suite 198/198. Mutation spot-checks (dropping the rounding remainder; ignoring dividend credits in collections) were caught by the property tests.
+* Open decisions D-03, D-07, D-11, D-13, D-23, D-24 are **represented as policy options, not decided**. They remain blocking for activating any engine-backed group (P2 activation gate), not for the library.
+* Deviations from the plan: Model B golden examples (B-0..B-7) move to P9 (legal gate); property tests use a seeded PRNG instead of `fast-check` (D-31 open); `rounding.ts` merged into `decimal.ts`.
+* G1 still requires the business owner's review of the FINANCIAL_ENGINE numbers.
+
 ## 3. Dependency graph
 ```
 P0 ─▶ P1 ─▶ P2 ─▶ P3 ─▶ P4 ─▶ P5 ─▶ P6 ─▶ P8

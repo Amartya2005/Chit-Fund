@@ -26,6 +26,27 @@ Rules:
 5. **Independence.** `chit/` and `interest/` share only `decimal.ts`/`rounding.ts`/`breakdown.ts`. Neither imports the other.
 6. **Backend authority.** The frontend may show previews returned by the API; it never computes amounts that are persisted. (Today the manager screen computes its own preview — `AuctionsPayoutsTab.tsx` lines 89–96 — with JS floats; this becomes display-only of the API preview.)
 
+### 1.1 P1 implementation status (library only — not yet called by any API)
+
+Implemented in `backend/src/finance/` (engine version `1.0.0`): `decimal.ts`, `breakdown.ts`, `canonical.ts`, `version.ts`, `chit/{policy,contribution,auction,dues,lifecycle}.ts`. `rounding.ts` was folded into `decimal.ts` (`round(value, mode, scale)`); `interest/` (Model B) is **not** implemented — it is P9 behind the legal gate.
+
+| Function | Purpose |
+|---|---|
+| `computeContribution({chitValue, periods}, policy)` | §3.2; regular and last-period amount, tracked difference |
+| `computeAuctionOutcome(input, policy)` | §3.3/3.4/3.6; commission, pool, per-share, remainder, every paisa allocated, gross/net prize, refusals as error codes |
+| `evaluateDues(periods, asOf)` / `allocatePayment(amount, open, rule, tagged?)` | §3.5; due today = DUE, only past = OVERDUE; `TAGGED_PERIOD` (existing) or `OLDEST_FIRST` |
+| `simulateAlignedGroup({chitValue, seats, discounts}, policy)` | whole-group simulation for aligned frequency (M1) and INV-A8 check |
+| `buildCalculationRecord` / `verifyCalculationRecord` | canonical JSON + sha256 of inputs, policy, outputs; recomputation check (INV-G2) |
+
+**Policy options (no defaults).** `ChitPolicy` makes each open decision a required field; a missing field is a validation error, never a silent default:
+`commission.basis` CHIT_VALUE/DISCOUNT/FIXED_AMOUNT and `commission.source` FROM_DISCOUNT (A1)/FROM_PRIZE (A2) (D-13) · `commission.whenDiscountBelowCommission` REJECT/CAP_TO_DISCOUNT (D-11 options (a)/(b); receivable and agreement-specific rules are not modelled) · `commission.rounding` · `dividend.divisor` SEATS/ACTIVE_TICKETS/ACTIVE_NON_PRIZED_TICKETS (+ `winnerSharesCurrentDividend`) and `dividend.unallocatedDestination` PENDING_DECISION/ROUNDING_RESERVE — a label only, no accounting destination (D-03) · `dividend.timing` NEXT_PERIOD_CREDIT/SAME_PERIOD_CREDIT/CASH_PAYOUT (D-07) · `contribution.rounding` PAISE_HALF_UP/PAISE_DOWN/RUPEE_HALF_UP and `contribution.differenceHandling` TRACK/LAST_PERIOD_ADJUSTS (D-24) · optional `discount.min/max/step` · optional `legalLimits` (values must come from L-01/L-02; tests use placeholders).
+
+`legacyP0Policy(rate)` = CHIT_VALUE · FROM_DISCOUNT · HALF_UP · REJECT · SEATS · PENDING_DECISION · NEXT_PERIOD_CREDIT · PAISE_HALF_UP · TRACK. It documents the existing behaviour (P0 `p0-1`); it is **not** an approved business policy.
+
+**Parity with P0.** With `legacyP0Policy`, `computeAuctionOutcome` reproduces `calculateAuction` (P0) to the paisa — commission, shortfall, pool, gross prize, next-period net due, credited/pending totals, every allocation row and every refusal — over 10,000 random inputs plus the P0 fixtures. One reporting-only difference: when no next instalment exists, P0 reports `dividendPerTicket = pool ÷ seats` although nobody receives it; the engine reports `dividendPerShare = 0.00` (the whole pool is `NO_TARGET_PERIOD`). The engine additionally checks that the winner holds an ACTIVE ticket (P0 does this outside the calculation).
+
+**Worked examples pinned as golden tests:** A-1 (both roundings, last-period adjustment), A-2, A-3, 3-seat remainder, 2.5 % × ₹3,33,333.33, 4-of-10 active, A2 variant, D < F under REJECT and CAP_TO_DISCOUNT, A-4 lifecycle (REJECT stops at auction 10; CAP_TO_DISCOUNT: Σ collected 9,68,000 − Σ prizes 9,23,000 = recognised commission 45,000, shortfall 5,000 reported). Model B examples B-0..B-7 are deferred to P9.
+
 ---
 
 ## 2. Currency, precision and rounding [PROPOSED]
@@ -284,7 +305,7 @@ Instalment ₹8,884.88 overdue, 24 % p.a., 15 days beyond grace → **₹87.63**
 | INV-B4 | Penal/overdue amounts never accrue on themselves unless the snapshot explicitly allows it (default: never). |
 | INV-B5 | Interest and chit records never share an account role or a source table. |
 
-Property-based tests (`fast-check`, D-31) generate random valid configs and amounts to check INV-A1..A5 and INV-B1..B4; golden tests pin the worked examples above.
+Property-based tests generate random valid configs and amounts to check INV-A1..A5 and INV-B1..B4; golden tests pin the worked examples above. **P1:** implemented without `fast-check` (D-31 not approved) as seeded, deterministic randomized tests (`backend/tests/unit/finance/properties.test.ts`, 5 seeds) covering INV-A1, A2, A3, A4, A5, A7, A8 and INV-G2 determinism; INV-B* belong to P9.
 
 ---
 

@@ -59,6 +59,21 @@ Status: **awaiting approval.** Each item lists alternatives and, where reasonabl
 | D-36 | Should KYC verification or overdue dues block auction eligibility in the existing workflow? | P0 reports KYC as informational only and does not check dues (not existing behaviour). |
 | D-37 | Should a surrendered member be allowed to re-enrol in the same group? | P0 refuses re-enrolment (unique ticket-per-subscriber constraint kept). |
 
+### 2b. How P1 represents open decisions (nothing decided)
+
+| Decision | P1 policy field(s) | Options available | Not modelled (would need new code once decided) |
+|---|---|---|---|
+| D-03 | `dividend.divisor`, `dividend.winnerSharesCurrentDividend`, `dividend.unallocatedDestination` | SEATS (existing) / ACTIVE_TICKETS / ACTIVE_NON_PRIZED_TICKETS; PENDING_DECISION / ROUNDING_RESERVE (labels only) | remainder to foreman or to first tickets; carrying the reserve into the next pool |
+| D-07 | `dividend.timing` | NEXT_PERIOD_CREDIT (existing) / SAME_PERIOD_CREDIT / CASH_PAYOUT | accumulate to group end |
+| D-11 | `commission.whenDiscountBelowCommission` | REJECT (existing) / CAP_TO_DISCOUNT | shortfall receivable; chit-agreement rule; no-bid handling |
+| D-13 | `commission.basis`, `commission.source` | CHIT_VALUE (existing) / DISCOUNT / FIXED_AMOUNT; FROM_DISCOUNT (A1, existing) / FROM_PRIZE (A2) | — |
+| D-23 | `allocatePayment(..., rule)` | TAGGED_PERIOD (existing) / OLDEST_FIRST | penalty-vs-contribution order inside a period (with L-10) |
+| D-24 | `contribution.rounding`, `contribution.differenceHandling` | PAISE_HALF_UP (existing) / PAISE_DOWN / RUPEE_HALF_UP; TRACK / LAST_PERIOD_ADJUSTS | — |
+| L-01/L-02 | `legalLimits.maxDiscount`, `legalLimits.maxCommissionPercentOfChit` | any value supplied by legal validation | the values themselves (tests use placeholders) |
+| D-31 | — | P1 used a seeded PRNG; no dependency added | — |
+
+`legacyP0Policy()` selects the existing-behaviour option of each row so the engine can be proven equal to P0; it is not an approval of those options.
+
 ## 3. Legal and regulatory validation (L-xx) — to be answered by qualified counsel / CA
 
 | ID | Question | Why it matters |
@@ -96,7 +111,7 @@ Status: **awaiting approval.** Each item lists alternatives and, where reasonabl
 
 ## 5. Approval checklist for starting implementation
 - [ ] D-01 scope of release 1
-- [ ] D-03, D-07, D-11, D-13 (Model A core rules) — required for P1
+- [ ] D-03, D-07, D-11, D-13 (Model A core rules) — P1 implemented them as explicit policy options without choosing; a decision is now required before any engine-backed group is activated (P2), not for the library
 - [ ] L-01, L-02 answered and legal limit profile values provided — required before any engine group is activated
 - [ ] D-19 ledger cut-over approach — required for P4
 - [ ] D-06 frequency combinations (+ L-06) — required for P5
