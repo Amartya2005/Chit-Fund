@@ -175,6 +175,9 @@ export const createAuctionResult = async (req: AuthRequest, res: Response) => {
     }
     const groupRecord = await loadGroupForTenant(req, req.body.groupId);
     companyIdForAudit = groupRecord.companyId;
+    if (groupRecord.engineVersion !== 'LEGACY') {
+      throw new HttpError(409, 'This group runs on the auction engine: record auctions through its auction sessions.', 'ENGINE_GROUP_USE_SESSIONS');
+    }
     const parsed = parseRequest(req.body, groupRecord, { requireWinner: true, requireDate: true });
 
     const result = await prisma.$transaction(async (tx) => {

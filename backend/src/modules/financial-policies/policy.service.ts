@@ -29,7 +29,7 @@ export const groupFacts = (g: GroupRow): GroupFacts => ({
   commissionRatePercent: new D(String(g.foremanCommissionPct)).toString(),
 });
 
-const GROUP_SELECT = { id: true, companyId: true, chitValue: true, maxMembers: true, totalMonths: true, foremanCommissionPct: true } as const;
+const GROUP_SELECT = { id: true, companyId: true, chitValue: true, maxMembers: true, totalMonths: true, foremanCommissionPct: true, engineVersion: true } as const;
 
 /** A not-yet-active version applied "as if active" (validation, activation impact). */
 export interface Overlay {
@@ -93,11 +93,18 @@ export async function violationsIntroducedBy(db: Db, companyId: string, overlay:
   const targets: (GroupFacts | null)[] = [overlay.scopeKey === COMPANY_SCOPE_KEY ? null : undefined, ...groups.map((g) => groupFacts(g as GroupRow))].filter(
     (g): g is GroupFacts | null => g !== undefined
   );
+  const engineGroups = new Set(groups.filter((g) => g.engineVersion !== 'LEGACY').map((g) => g.id));
   const out: ConfigIssue[] = [];
   for (const g of targets) {
-    const before = resolveConfiguration(layersFor(active, g?.id ?? null), g).violations;
-    const after = resolveConfiguration(layersFor(active, g?.id ?? null, overlay), g).violations;
-    out.push(...newViolations(before, after));
+    const before = resolveConfiguration(layersFor(active, g?.id ?? null), g);
+    const after = resolveConfiguration(layersFor(active, g?.id ?? null, overlay), g);
+    out.push(...newViolations(before.violations, after.violations));
+    // A group running on the engine must never lose a decision it depends on.
+    if (g && engineGroups.has(g.id)) {
+      for (const path of after.missing.filter((p) => !before.missing.includes(p))) {
+        out.push({ code: 'ENGINE_GROUP_DECISION_REMOVED', path, groupId: g.id, message: `Group ${g.id} runs on the engine and needs ${path}; this version would leave it undecided.` });
+      }
+    }
   }
   return out;
 }

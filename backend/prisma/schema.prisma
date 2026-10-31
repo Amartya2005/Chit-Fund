@@ -81,6 +81,9 @@ model User {
   createdKhataCustomers     KhataCustomer[]    @relation("CustomerCreator")
   recordedKhataTransactions KhataTransaction[] @relation("KhataTxRecorder")
 
+  requestedAdjustments  FinancialAdjustment[]    @relation("AdjustmentRequestedBy")
+  decidedAdjustments    FinancialAdjustment[]    @relation("AdjustmentDecidedBy")
+  engineConversions     EngineConversion[]
   createdPolicyVersions FinancialPolicyVersion[] @relation("PolicyCreatedBy")
   decidedPolicyVersions FinancialPolicyVersion[] @relation("PolicyDecidedBy")
   lockedConfigSnapshots ConfigSnapshot[]         @relation("SnapshotLockedBy")
@@ -164,6 +167,11 @@ model ChitGroup {
   engineVersion  String                   @default("LEGACY")
   policyVersions FinancialPolicyVersion[]
 
+  // P3: engine dues
+  contributionPeriods ContributionPeriod[]
+  memberDues          MemberDue[]
+  engineConversion    EngineConversion?
+
   @@unique([companyId, groupCode])
   @@index([companyId, status])
   @@index([assignedStaffId])
@@ -199,6 +207,7 @@ model ChitGroupMember {
 
   auctionsWon         Auction[]
   dividendAllocations AuctionDividendAllocation[]
+  dues                MemberDue[]
 
   @@unique([groupId, ticketNumber])
   @@unique([groupId, subscriberId])
@@ -247,7 +256,8 @@ model PaymentTransaction {
   group      ChitGroup  @relation(fields: [groupId], references: [id])
   recordedBy User       @relation("RecordedBy", fields: [recordedByUserId], references: [id])
 
-  receipt Receipt?
+  receipt     Receipt?
+  allocations PaymentAllocation[]
 
   @@unique([companyId, receiptNo])
   @@unique([companyId, idempotencyKey])
@@ -722,4 +732,139 @@ model ConfigSnapshot {
   @@unique([subjectType, subjectId])
   @@index([companyId, lockedAt])
   @@index([lockedById])
+}
+
+// ---------------------------------------------------------------------------
+// P3 — Per-ticket dues, payment allocation, penalties, adjustments (migration M2)
+// Only groups converted to the engine (ChitGroup.engineVersion = "ENGINE_V1") have rows here.
+// Money stays exact (Prisma.Decimal, see ENGINE_DECIMAL_MODELS). Business dates: YYYY-MM-DD.
+// ---------------------------------------------------------------------------
+
+model ContributionPeriod {
+  id         String   @id @default(uuid())
+  companyId  String
+  groupId    String
+  periodNo   Int
+  dueDate    String
+  baseAmount Decimal  @db.Decimal(15, 2)
+  createdAt  DateTime @default(now())
+
+  group ChitGroup   @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  dues  MemberDue[]
+
+  @@unique([groupId, periodNo])
+  @@index([companyId, dueDate])
+}
+
+/// One obligation per ticket per contribution period. Status is derived on read (as-of date).
+model MemberDue {
+  id                 String   @id @default(uuid())
+  companyId          String
+  groupId            String
+  periodId           String
+  periodNo           Int
+  memberId           String
+  subscriberId       String
+  dueDate            String
+  grossAmount        Decimal  @db.Decimal(15, 2)
+  dividendCredit     Decimal  @default(0) @db.Decimal(15, 2)
+  penaltyAmount      Decimal  @default(0) @db.Decimal(15, 2)
+  penaltyWaived      Decimal  @default(0) @db.Decimal(15, 2)
+  contributionWaived Decimal  @default(0) @db.Decimal(15, 2)
+  paidAmount         Decimal  @default(0) @db.Decimal(15, 2)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  group       ChitGroup             @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  period      ContributionPeriod    @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  member      ChitGroupMember       @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  allocations PaymentAllocation[]
+  penalties   PenaltyCharge[]
+  adjustments FinancialAdjustment[]
+
+  @@unique([memberId, periodNo])
+  @@index([companyId, groupId, dueDate])
+  @@index([subscriberId])
+  @@index([periodId])
+}
+
+/// How each verified payment of an engine group was applied. Reversal marks rows, never deletes.
+model PaymentAllocation {
+  id         String    @id @default(uuid())
+  companyId  String
+  paymentId  String
+  dueId      String?
+  /// DUE | ADVANCE | LEGACY_EXITED_TICKET
+  bucket     String
+  amount     Decimal   @db.Decimal(15, 2)
+  reversedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  payment PaymentTransaction @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  due     MemberDue?         @relation(fields: [dueId], references: [id], onDelete: Restrict)
+
+  @@index([paymentId])
+  @@index([dueId])
+  @@index([companyId, bucket])
+}
+
+/// A penalty charged on one due. chargeKey makes penalty runs idempotent (one charge per missed period).
+model PenaltyCharge {
+  id        String   @id @default(uuid())
+  companyId String
+  dueId     String
+  chargeKey String   @unique
+  amount    Decimal  @db.Decimal(15, 2)
+  asOf      String
+  rule      Json
+  createdAt DateTime @default(now())
+
+  due MemberDue @relation(fields: [dueId], references: [id], onDelete: Restrict)
+
+  @@index([dueId])
+  @@index([companyId, createdAt])
+}
+
+/// Waivers, with optional maker–checker (SETTLEMENT.adjustmentApproval).
+model FinancialAdjustment {
+  id            String    @id @default(uuid())
+  companyId     String
+  groupId       String
+  /// PENALTY_WAIVER | DUE_WAIVER
+  type          String
+  dueId         String
+  amount        Decimal   @db.Decimal(15, 2)
+  reason        String
+  /// REQUESTED | APPLIED | REJECTED
+  status        String
+  requestedById String
+  decidedById   String?
+  decisionNote  String?
+  createdAt     DateTime  @default(now())
+  decidedAt     DateTime?
+
+  due         MemberDue @relation(fields: [dueId], references: [id], onDelete: Restrict)
+  requestedBy User      @relation("AdjustmentRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  decidedBy   User?     @relation("AdjustmentDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict)
+
+  @@index([companyId, status])
+  @@index([dueId])
+  @@index([requestedById])
+  @@index([decidedById])
+}
+
+/// Result of converting a legacy group to the engine (reconciliation report kept permanently).
+model EngineConversion {
+  id            String   @id @default(uuid())
+  companyId     String
+  groupId       String   @unique
+  snapshotId    String
+  report        Json
+  convertedById String
+  convertedAt   DateTime @default(now())
+
+  group       ChitGroup @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  convertedBy User      @relation(fields: [convertedById], references: [id], onDelete: Restrict)
+
+  @@index([convertedById])
 }

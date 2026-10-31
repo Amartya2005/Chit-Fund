@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import { onTicketExited } from '../../engine/dues/ticketHooks.js';
 import { prisma } from '../../config/prisma.js';
 import { AuthRequest } from '../../middleware/auth.js';
 import { sendError, notFound } from '../../lib/http.js';
@@ -314,6 +315,8 @@ export const processRefund = async (req: AuthRequest, res: Response) => {
           where: { groupId: refund.groupId, subscriberId: refund.subscriberId, status: 'ACTIVE' },
           data: { status: 'SURRENDERED', exitedAt: new Date(), exitReason: 'SURRENDER_APPROVED', exitRefundId: refund.id },
         });
+        // Engine groups only (P3): future instalments of the exited ticket are no longer owed.
+        await onTicketExited(tx, refund.groupId, refund.subscriberId, userId);
       }
 
       await tx.auditLog.create({

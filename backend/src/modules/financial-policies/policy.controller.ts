@@ -115,12 +115,26 @@ export const listTemplates = async (_req: AuthRequest, res: Response) => {
         legallyValidated: false,
         description:
           'Reproduces how the app calculates auctions today: commission on the chit value paid out of the discount, auctions refused when the discount is below the commission, dividend divided by all seats and credited to the next instalment, remainders kept pending. The commission % comes from each group.',
-        notice: 'Templates are starting points, not approved business rules or legal advice. Choosing it does not decide D-03, D-07, D-11, D-13 or D-24. Legal limits are left empty.',
+        notice: 'Templates are starting points, not approved business rules or legal advice. Choosing it does not decide D-03, D-04, D-07, D-11, D-13, D-14, D-22, D-23 or D-24. Legal limits are left empty.',
         policies: {
           CHIT_ECONOMICS: { basis: legacy.commission.basis, source: legacy.commission.source, rounding: legacy.commission.rounding, whenDiscountBelowCommission: legacy.commission.whenDiscountBelowCommission },
           DIVIDEND: legacy.dividend,
-          CONTRIBUTION: legacy.contribution,
+          // payments are recorded against the instalment the collector chooses
+          CONTRIBUTION: { ...legacy.contribution, paymentAllocation: 'TAGGED_PERIOD' },
+          // the app charges no penalties today
+          PENALTY: { mode: 'NONE' },
+          // the manager settles directly; payouts are created without deductions
+          SETTLEMENT: { settlementApproval: 'NONE', prizeDeductions: 'NONE' },
+          // auctions are offline today
+          SCHEDULING: { mode: 'OFFLINE' },
+          // P0 eligibility: repeat wins allowed (D-04 open), dues not checked, KYC informational only
+          ELIGIBILITY: { maxWinsPerTicket: 'UNLIMITED', maxOverdueAmount: 'NOT_CHECKED', requireKycVerified: false, overridableRules: [] },
         },
+        notDecidedByTemplate: [
+          'settlement.adjustmentApproval (waivers do not exist today)',
+          'scheduling.lockPoint (D-08)',
+          'scheduling.noBidRule (D-11)',
+        ],
       },
     ],
   });

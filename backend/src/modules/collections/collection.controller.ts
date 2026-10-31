@@ -5,6 +5,7 @@ import { sendError, badRequest, notFound } from '../../lib/http.js';
 import { parsePositiveAmount, sumMoney } from '../../lib/money.js';
 import { nextSequence, maxNumericSuffix } from '../../lib/sequence.js';
 import { validateImageDataUrl } from '../../lib/upload.js';
+import { onPaymentReversed, onPaymentVerified } from '../../engine/dues/paymentHooks.js';
 import {
   assertSameCompany,
   assertStaffAssignedToGroup,
@@ -182,6 +183,9 @@ export const recordPayment = async (req: AuthRequest, res: Response) => {
           receiptNo,
         },
       });
+
+      // Engine groups only (P3): apply the verified payment to the member's dues.
+      if (verificationStatus === 'VERIFIED') await onPaymentVerified(tx, transaction.id);
 
       await tx.auditLog.create({
         data: {
@@ -416,6 +420,8 @@ export const reverseTransaction = async (req: AuthRequest, res: Response) => {
       if (result.count === 0) {
         throw badRequest('Transaction has already been reversed');
       }
+      // Engine groups only (P3): undo the payment's allocation to dues.
+      await onPaymentReversed(tx, id);
 
       await tx.auditLog.create({
         data: {
@@ -470,6 +476,8 @@ export const approveTransaction = async (req: AuthRequest, res: Response) => {
         },
       });
       if (result.count === 0) throw badRequest('Transaction is no longer awaiting approval');
+      // Engine groups only (P3): apply the now-verified payment to dues.
+      await onPaymentVerified(tx, id);
 
       await tx.auditLog.create({
         data: {

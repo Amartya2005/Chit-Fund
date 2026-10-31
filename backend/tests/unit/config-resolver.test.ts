@@ -15,26 +15,44 @@ const legacyLayers = (level: 'COMPANY' | 'GROUP' = 'COMPANY') => {
     layer(level, 'CONTRIBUTION', { ...p.contribution }),
   ];
 };
+/** Explicit test choices for the workflow kinds (not business recommendations). */
+const workflowLayers = () => [
+  layer('COMPANY', 'CONTRIBUTION', { paymentAllocation: 'OLDEST_FIRST' }),
+  layer('COMPANY', 'PENALTY', { mode: 'NONE' }),
+  layer('COMPANY', 'SETTLEMENT', { settlementApproval: 'NONE', adjustmentApproval: 'SECOND_PERSON', prizeDeductions: 'NONE' }),
+  layer('COMPANY', 'SCHEDULING', { mode: 'OFFLINE', lockPoint: 'AT_RESULT_ENTRY', noBidRule: 'CANCEL_SESSION' }),
+  layer('COMPANY', 'ELIGIBILITY', { maxWinsPerTicket: 1, maxOverdueAmount: 'NOT_CHECKED', requireKycVerified: false, overridableRules: [] }),
+];
+const WORKFLOW_MISSING = [
+  'contribution.paymentAllocation',
+  'penalty.mode',
+  'settlement.settlementApproval', 'settlement.adjustmentApproval', 'settlement.prizeDeductions',
+  'scheduling.mode', 'scheduling.lockPoint', 'scheduling.noBidRule',
+  'eligibility.maxWinsPerTicket', 'eligibility.maxOverdueAmount', 'eligibility.requireKycVerified', 'eligibility.overridableRules',
+];
 const legal = (values: Record<string, unknown>) => layer('COMPANY', 'LEGAL_LIMITS', values);
 
 describe('configuration resolver — no business defaults', () => {
   it('with no policies every decision is reported missing and nothing is filled in', () => {
     const r = resolveConfiguration([], null);
     expect(r.complete).toBe(false);
-    expect(r.missing).toEqual([
+    expect(r.missing.sort()).toEqual([
       'commission.basis', 'commission.source', 'commission.rounding', 'commission.whenDiscountBelowCommission',
       'dividend.divisor', 'dividend.unallocatedDestination', 'dividend.timing',
       'contribution.rounding', 'contribution.differenceHandling', 'commission.ratePercent',
-    ]);
+      ...WORKFLOW_MISSING,
+    ].sort());
     expect(r.missingLegalLimits).toEqual(['legalLimits.maxDiscount', 'legalLimits.maxCommissionPercentOfChit']);
-    expect(r.values).toEqual({ commission: {}, discount: {}, dividend: {}, contribution: {}, legalLimits: {} });
+    expect(r.values).toEqual({ commission: {}, discount: {}, dividend: {}, contribution: {}, penalty: {}, settlement: {}, scheduling: {}, eligibility: {}, bidding: {}, legalLimits: {} });
     expect(r.policy).toBeNull();
     expect(r.readyForLock).toBe(false);
   });
 
   it('company defaults + group commission % (GROUP_RECORD) reproduce the legacy engine policy', () => {
     const r = resolveConfiguration(legacyLayers(), group);
-    expect(r.complete).toBe(true);
+    // the auction policy is available as soon as the Model A fields are set …
+    expect(r.missing.sort()).toEqual([...WORKFLOW_MISSING].sort());
+    expect(r.complete).toBe(false);
     expect(r.sources['commission.ratePercent']).toEqual({ level: 'GROUP_RECORD' });
     expect(r.sources['dividend.divisor'].level).toBe('COMPANY');
     const { name: _a, ...resolved } = r.policy!;
@@ -65,7 +83,7 @@ describe('configuration resolver — no business defaults', () => {
   });
 
   it('ready to lock only with a group, every decision, a complete legal profile and no violation; hash is canonical', () => {
-    const layers = [...legacyLayers(), legal({ maxDiscount: { type: 'PERCENT_OF_CHIT', value: '40' }, maxCommissionPercentOfChit: '5' })];
+    const layers = [...legacyLayers(), ...workflowLayers(), legal({ maxDiscount: { type: 'PERCENT_OF_CHIT', value: '40' }, maxCommissionPercentOfChit: '5' })];
     const r = resolveConfiguration(layers, group);
     expect(r.readyForLock).toBe(true);
     expect(r.policy!.legalLimits).toEqual({ maxDiscount: { type: 'PERCENT_OF_CHIT', value: '40' }, maxCommissionPercentOfChit: '5' });
@@ -119,6 +137,35 @@ describe('configuration resolver — no business defaults', () => {
     const a = { code: 'LIMIT_EXCEEDED', path: 'x', message: '', groupId: 'g1' };
     const b = { code: 'LIMIT_EXCEEDED', path: 'y', message: '' };
     expect(newViolations([a], [a, b])).toEqual([b]);
+  });
+});
+
+describe('workflow kinds — conditional decisions', () => {
+  it('penalty, approval threshold and bidding fields are required only when their option needs them', () => {
+    const base = [...legacyLayers(), ...workflowLayers()];
+    expect(resolveConfiguration(base, group).missing).toEqual([]);
+    const r = resolveConfiguration(
+      [
+        ...base,
+        layer('GROUP', 'PENALTY', { mode: 'PERCENT_OF_OVERDUE' }),
+        layer('GROUP', 'SETTLEMENT', { settlementApproval: 'ABOVE_THRESHOLD' }),
+        layer('GROUP', 'SCHEDULING', { mode: 'HYBRID' }),
+      ],
+      group
+    );
+    expect(r.missing).toEqual([
+      // the company-level settlement/scheduling fields still apply (levels merge field by field)
+      'penalty.percent', 'penalty.graceDays', 'settlement.approvalThreshold',
+      'bidding.format', 'bidding.minIncrement', 'bidding.antiSnipingWindowSeconds', 'bidding.extensionSeconds', 'bidding.maxExtensions', 'bidding.showBidderAs', 'bidding.proxyBidding',
+    ]);
+    expect(r.policy).not.toBeNull(); // Model A still complete
+  });
+  it('schemas: eligibility needs explicit values; unknown rule names are refused', () => {
+    expect(parsePolicyValues('ELIGIBILITY', { maxWinsPerTicket: 'UNLIMITED', overridableRules: ['KYC'] }).ok).toBe(true);
+    expect(parsePolicyValues('ELIGIBILITY', { maxWinsPerTicket: 0 }).ok).toBe(false);
+    expect(parsePolicyValues('ELIGIBILITY', { overridableRules: ['MAX_WINS'] }).ok).toBe(false);
+    expect(parsePolicyValues('BIDDING', { minIncrement: '0' }).ok).toBe(false);
+    expect(parsePolicyValues('PENALTY', { graceDays: 1.5 }).ok).toBe(false);
   });
 });
 

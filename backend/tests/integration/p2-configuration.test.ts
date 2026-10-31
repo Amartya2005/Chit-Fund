@@ -70,7 +70,7 @@ describe('P2 — creating versions', () => {
     expect(bad.status).toBe(422);
     expect(bad.body.code).toBe('VALIDATION_FAILED');
     expect(bad.body.details.issues.map((i: any) => i.path).sort()).toEqual(['values.basis', 'values.ratePercent']);
-    const pen = await create(A.managerToken, { scope: 'COMPANY', kind: 'PENALTY', values: { x: 1 } });
+    const pen = await create(A.managerToken, { scope: 'COMPANY', kind: 'DEFAULT_HANDLING', values: { x: 1 } });
     expect([pen.status, pen.body.code]).toEqual([422, 'KIND_NOT_AVAILABLE']);
     const auc = await create(A.managerToken, { scope: 'AUCTION', kind: 'AUCTION_RULES', values: { step: '100' } });
     expect([auc.status, auc.body.code]).toEqual([422, 'SCOPE_NOT_AVAILABLE']);
@@ -149,6 +149,12 @@ describe('P2 — template, inheritance and worked example', () => {
     for (const [kind, values] of Object.entries(t.body.data[0].policies)) {
       await createActive(B.managerToken, { scope: 'COMPANY', kind, values });
     }
+    expect(t.body.data[0].notDecidedByTemplate).toHaveLength(3);
+    const partial = (await effective(B.managerToken, `?groupId=${B.group.id}`)).body.data;
+    expect(partial.missing).toEqual(['settlement.adjustmentApproval', 'scheduling.lockPoint', 'scheduling.noBidRule']);
+    // the decisions the template leaves open are made explicitly (test choices)
+    await createActive(B.managerToken, { scope: 'COMPANY', kind: 'SETTLEMENT', values: { ...t.body.data[0].policies.SETTLEMENT, adjustmentApproval: 'SECOND_PERSON' } });
+    await createActive(B.managerToken, { scope: 'COMPANY', kind: 'SCHEDULING', values: { mode: 'OFFLINE', lockPoint: 'AT_RESULT_ENTRY', noBidRule: 'CANCEL_SESSION' } });
     const e = (await effective(B.managerToken, `?groupId=${B.group.id}`)).body.data;
     expect(e.complete).toBe(true);
     expect(e.readyForLock).toBe(false); // legal limits not set

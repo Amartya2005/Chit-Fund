@@ -36,6 +36,20 @@ export const DECIMAL_FIELDS: Record<string, readonly string[]> = {
   AuctionDividendAllocation: ['amount'],
 };
 
+/**
+ * Engine tables (P3+) keep money as exact Prisma.Decimal values end to end: engine code
+ * converts them with the finance library and engine endpoints return them as decimal
+ * strings. Every Decimal column must be either converted (DECIMAL_FIELDS) or belong to
+ * one of these models — the schema test enforces it.
+ */
+export const ENGINE_DECIMAL_MODELS: readonly string[] = [
+  'ContributionPeriod',
+  'MemberDue',
+  'PaymentAllocation',
+  'PenaltyCharge',
+  'FinancialAdjustment',
+];
+
 function createClient() {
   return new PrismaClient({
     datasources: { db: { url: env.databaseUrl } },

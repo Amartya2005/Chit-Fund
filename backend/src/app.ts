@@ -21,6 +21,7 @@ import * as accountingController from './modules/accounting/accounting.controlle
 import * as notificationController from './modules/notifications/notification.controller.js';
 import * as khataController from './modules/khata/khata.controller.js';
 import * as policyController from './modules/financial-policies/policy.controller.js';
+import { registerEngineRoutes } from './engine/routes.js';
 
 const app = express();
 
@@ -178,6 +179,9 @@ router.post('/financial-policies', authenticateToken, requireRoles('SUPER_ADMIN'
 router.post('/financial-policies/:id/validate', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.validateVersion);
 router.post('/financial-policies/:id/activate', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.activateVersion);
 router.post('/financial-policies/:id/reject', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), policyController.rejectVersion);
+
+// Auction & financial engine (P3–P10)
+registerEngineRoutes(router);
 
 // Payout & Refund Routes (AC-26, AC-27, AC-28)
 router.get('/payouts', authenticateToken, requireRoles('SUPER_ADMIN', 'MANAGER'), payoutController.listPayouts);

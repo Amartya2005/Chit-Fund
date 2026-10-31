@@ -663,6 +663,15 @@ export const deleteChitGroup = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // P3: groups converted to the engine keep their dues and allocation history.
+    if (group.engineVersion !== 'LEGACY') {
+      return res.status(400).json({
+        success: false,
+        code: 'ENGINE_HISTORY',
+        message: `Cannot delete chit group '${group.name}' because it runs on the auction engine. Please set its status to CLOSED instead.`,
+      });
+    }
+
     // P2: group-level financial settings are kept permanently (append-only history).
     const policyVersions = await prisma.financialPolicyVersion.count({ where: { groupId: id } });
     if (policyVersions > 0) {

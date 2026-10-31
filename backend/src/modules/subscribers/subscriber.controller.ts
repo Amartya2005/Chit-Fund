@@ -958,6 +958,15 @@ export const deleteSubscriber = async (req: AuthRequest, res: Response) => {
     }
 
     // Delete group memberships first
+    // P3: tickets with engine dues are financial history and are never deleted.
+    const engineDues = await prisma.memberDue.count({ where: { subscriberId: id } });
+    if (engineDues > 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'ENGINE_HISTORY',
+        message: `Cannot delete member ${subscriber.fullName} (${subscriber.subscriberCode}) because their tickets have engine dues. Deactivate the member instead.`,
+      });
+    }
     await prisma.chitGroupMember.deleteMany({ where: { subscriberId: id } });
 
     // Delete subscriber

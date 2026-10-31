@@ -2,39 +2,49 @@ import { z } from 'zod';
 import { D, FinanceInputError, money, percent } from '../../finance/decimal.js';
 
 /**
- * Policy documents (schemaVersion 1) for the Model A kinds implemented by the P1 engine.
+ * Policy documents (schemaVersion 1): Model A economics (P1/P2) plus the engine workflow
+ * kinds (penalties, settlement & approvals, scheduling, eligibility, bidding).
  *
  * Every document is PARTIAL: a field that is absent inherits from the level below
  * (company ← group). No field has a default — fields nobody sets are reported as missing
- * decisions by the resolver. `null` is accepted only for optional bounds (AUCTION_RULES)
- * and means "explicitly no bound at this level".
- *
- * Kinds whose rules depend on later phases (penalties, eligibility, scheduling, bidding,
- * settlement, default handling, interest) are refused until those phases define them.
+ * decisions by the resolver. `null` is accepted only for optional bounds (AUCTION_RULES,
+ * PENALTY.maxPerPeriod) and means "explicitly none at this level".
  */
 export const SCHEMA_VERSION = 1;
 
-export const SUPPORTED_KINDS = ['CHIT_ECONOMICS', 'AUCTION_RULES', 'DIVIDEND', 'CONTRIBUTION', 'LEGAL_LIMITS'] as const;
+export const SUPPORTED_KINDS = [
+  'CHIT_ECONOMICS',
+  'AUCTION_RULES',
+  'DIVIDEND',
+  'CONTRIBUTION',
+  'PENALTY',
+  'SETTLEMENT',
+  'SCHEDULING',
+  'ELIGIBILITY',
+  'BIDDING',
+  'LEGAL_LIMITS',
+] as const;
 export type SupportedKind = (typeof SUPPORTED_KINDS)[number];
 
 /** Phase in which each not-yet-supported kind gets its schema (IMPLEMENTATION_ROADMAP §2). */
 export const UNSUPPORTED_KIND_PHASE: Record<string, string> = {
-  PENALTY: 'P3 (decision D-22, L-10)',
-  DEFAULT_HANDLING: 'P5 (decision D-15)',
-  ELIGIBILITY: 'P6 (decisions D-04, D-05, L-03)',
-  SCHEDULING: 'P5 (decision D-06)',
-  SETTLEMENT: 'P5 (decisions D-14, D-15)',
-  BIDDING: 'P8 (decision D-12)',
+  DEFAULT_HANDLING: 'not modelled — prize deductions are SETTLEMENT.prizeDeductions; handling of a prized member who defaults later needs decision D-15',
   ROUNDING: 'not used — rounding is part of each kind (CHIT_ECONOMICS.rounding, CONTRIBUTION.rounding)',
-  INTEREST_PRODUCT: 'P9 (legal gate D-25, L-07)',
+  INTEREST_PRODUCT: 'interest products are managed by the interest engine (/engine/interest/products), which is locked until legal sign-off (D-25, L-07)',
 };
 
 /** Section of the resolved configuration that each kind fills. */
-export const KIND_SECTION: Record<SupportedKind, 'commission' | 'discount' | 'dividend' | 'contribution' | 'legalLimits'> = {
+export type SectionName = 'commission' | 'discount' | 'dividend' | 'contribution' | 'penalty' | 'settlement' | 'scheduling' | 'eligibility' | 'bidding' | 'legalLimits';
+export const KIND_SECTION: Record<SupportedKind, SectionName> = {
   CHIT_ECONOMICS: 'commission',
   AUCTION_RULES: 'discount',
   DIVIDEND: 'dividend',
   CONTRIBUTION: 'contribution',
+  PENALTY: 'penalty',
+  SETTLEMENT: 'settlement',
+  SCHEDULING: 'scheduling',
+  ELIGIBILITY: 'eligibility',
+  BIDDING: 'bidding',
   LEGAL_LIMITS: 'legalLimits',
 };
 
@@ -68,6 +78,7 @@ const bound = z
   });
 
 const nonEmpty = (o: Record<string, unknown>) => Object.keys(o).length > 0;
+const count = (label: string, min = 0, max = 100000) => z.number().int(`${label} must be a whole number`).min(min).max(max);
 
 export const KIND_SCHEMAS: Record<SupportedKind, z.ZodTypeAny> = {
   CHIT_ECONOMICS: z
@@ -102,6 +113,61 @@ export const KIND_SCHEMAS: Record<SupportedKind, z.ZodTypeAny> = {
     .object({
       rounding: z.enum(['PAISE_HALF_UP', 'PAISE_DOWN', 'RUPEE_HALF_UP']).optional(),
       differenceHandling: z.enum(['TRACK', 'LAST_PERIOD_ADJUSTS']).optional(),
+      /** decision D-23: how a payment is applied to open dues */
+      paymentAllocation: z.enum(['TAGGED_PERIOD', 'OLDEST_FIRST']).optional(),
+    })
+    .strict()
+    .refine(nonEmpty, 'at least one field is required'),
+  /** decision D-22 (and L-10): penalties on overdue chit instalments */
+  PENALTY: z
+    .object({
+      mode: z.enum(['NONE', 'FLAT_PER_PERIOD', 'PERCENT_OF_OVERDUE']).optional(),
+      flatAmount: moneyField('flatAmount', { positive: true }).optional(),
+      percent: percentField('percent', { positive: true }).optional(),
+      graceDays: count('graceDays', 0, 365).optional(),
+      maxPerPeriod: moneyField('maxPerPeriod', { positive: true }).nullable().optional(),
+    })
+    .strict()
+    .refine(nonEmpty, 'at least one field is required'),
+  /** decisions D-14 (approvals) and D-15 (prize deductions) */
+  SETTLEMENT: z
+    .object({
+      settlementApproval: z.enum(['NONE', 'SECOND_PERSON', 'ABOVE_THRESHOLD']).optional(),
+      approvalThreshold: moneyField('approvalThreshold', { positive: true }).optional(),
+      adjustmentApproval: z.enum(['NONE', 'SECOND_PERSON']).optional(),
+      prizeDeductions: z.enum(['NONE', 'OVERDUE_DUES']).optional(),
+    })
+    .strict()
+    .refine(nonEmpty, 'at least one field is required'),
+  /** decisions D-08 (lock point), D-11 (no-bid auctions) and the auction mode */
+  SCHEDULING: z
+    .object({
+      mode: z.enum(['OFFLINE', 'ONLINE', 'HYBRID']).optional(),
+      lockPoint: z.enum(['AT_OPEN', 'AT_RESULT_ENTRY']).optional(),
+      noBidRule: z.enum(['CANCEL_SESSION', 'CARRY_FORWARD']).optional(),
+    })
+    .strict()
+    .refine(nonEmpty, 'at least one field is required'),
+  /** decisions D-04 (wins per ticket, L-03), D-36 (dues/KYC) — every rule must be stated explicitly */
+  ELIGIBILITY: z
+    .object({
+      maxWinsPerTicket: z.union([count('maxWinsPerTicket', 1, 1000), z.literal('UNLIMITED')]).optional(),
+      maxOverdueAmount: z.union([moneyField('maxOverdueAmount'), z.literal('NOT_CHECKED')]).optional(),
+      requireKycVerified: z.boolean().optional(),
+      overridableRules: z.array(z.enum(['MAX_OVERDUE', 'KYC'])).max(2).optional(),
+    })
+    .strict()
+    .refine(nonEmpty, 'at least one field is required'),
+  /** decisions D-12 (format, tie-break, identity), D-16 (proxy bidding) — online/hybrid auctions only */
+  BIDDING: z
+    .object({
+      format: z.enum(['OPEN_ASCENDING', 'SEALED']).optional(),
+      minIncrement: moneyField('minIncrement', { positive: true }).optional(),
+      antiSnipingWindowSeconds: count('antiSnipingWindowSeconds', 0, 3600).optional(),
+      extensionSeconds: count('extensionSeconds', 0, 3600).optional(),
+      maxExtensions: count('maxExtensions', 0, 100).optional(),
+      showBidderAs: z.enum(['TICKET_NUMBER', 'NAME']).optional(),
+      proxyBidding: z.enum(['NOT_ALLOWED', 'MANAGER_ON_BEHALF']).optional(),
     })
     .strict()
     .refine(nonEmpty, 'at least one field is required'),

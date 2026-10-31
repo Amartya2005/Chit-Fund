@@ -2,7 +2,7 @@ import { D, Dec, FinanceInputError, round } from '../../finance/decimal.js';
 import { canonicalize, sha256 } from '../../finance/canonical.js';
 import { FINANCE_ENGINE_VERSION } from '../../finance/version.js';
 import { Bound, ChitPolicy, validatePolicy } from '../../finance/chit/policy.js';
-import { KIND_SECTION, SupportedKind } from './policySchemas.js';
+import { KIND_SECTION, SectionName, SupportedKind } from './policySchemas.js';
 
 /**
  * Configuration resolver (pure). Resolution order (DATABASE_DESIGN §3):
@@ -41,7 +41,7 @@ export interface ConfigIssue {
   message: string;
   groupId?: string;
 }
-export type Section = 'commission' | 'discount' | 'dividend' | 'contribution' | 'legalLimits';
+export type Section = SectionName;
 export type ResolvedValues = Record<Section, Record<string, any>>;
 
 export interface ResolvedConfig {
@@ -65,11 +65,29 @@ export interface ResolvedConfig {
   hash: string;
 }
 
-const REQUIRED: Record<Exclude<Section, 'discount' | 'legalLimits'>, string[]> = {
+/** Always-required decisions per section (conditional ones are added in resolveConfiguration). */
+const REQUIRED: Partial<Record<Section, string[]>> = {
   commission: ['basis', 'source', 'rounding', 'whenDiscountBelowCommission'],
   dividend: ['divisor', 'unallocatedDestination', 'timing'],
-  contribution: ['rounding', 'differenceHandling'],
+  contribution: ['rounding', 'differenceHandling', 'paymentAllocation'],
+  penalty: ['mode'],
+  settlement: ['settlementApproval', 'adjustmentApproval', 'prizeDeductions'],
+  scheduling: ['mode', 'lockPoint', 'noBidRule'],
+  eligibility: ['maxWinsPerTicket', 'maxOverdueAmount', 'requireKycVerified', 'overridableRules'],
 };
+const BIDDING_FIELDS = ['format', 'minIncrement', 'antiSnipingWindowSeconds', 'extensionSeconds', 'maxExtensions', 'showBidderAs', 'proxyBidding'];
+const emptyValues = (): ResolvedValues => ({
+  commission: {},
+  discount: {},
+  dividend: {},
+  contribution: {},
+  penalty: {},
+  settlement: {},
+  scheduling: {},
+  eligibility: {},
+  bidding: {},
+  legalLimits: {},
+});
 const LEGAL_FIELDS = ['maxDiscount', 'maxCommissionPercentOfChit'];
 
 const inr = (d: Dec) => `₹${Number(d.toFixed(2)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -86,7 +104,7 @@ function compareBounds(a: Bound, b: Bound, C: Dec | null): number | null {
 }
 
 export function resolveConfiguration(layers: PolicyLayer[], group: GroupFacts | null): ResolvedConfig {
-  const values: ResolvedValues = { commission: {}, discount: {}, dividend: {}, contribution: {}, legalLimits: {} };
+  const values: ResolvedValues = emptyValues();
   const sources: Record<string, FieldSource> = {};
   const order: PolicyLevel[] = ['COMPANY', 'GROUP'];
   for (const level of order) {
@@ -137,6 +155,16 @@ export function resolveConfiguration(layers: PolicyLayer[], group: GroupFacts | 
   } else {
     if (c.ratePercent === undefined) missing.push('commission.ratePercent');
     if (c.fixedAmount !== undefined && c.basis !== undefined) warnings.push({ code: 'IGNORED_FIELD', path: 'commission.fixedAmount', message: 'Ignored: the commission is a percentage.' });
+  }
+  const pen = values.penalty;
+  if (pen.mode === 'FLAT_PER_PERIOD' && pen.flatAmount === undefined) missing.push('penalty.flatAmount');
+  if (pen.mode === 'PERCENT_OF_OVERDUE' && pen.percent === undefined) missing.push('penalty.percent');
+  if (pen.mode !== undefined && pen.mode !== 'NONE' && pen.graceDays === undefined) missing.push('penalty.graceDays');
+  const st = values.settlement;
+  if (st.settlementApproval === 'ABOVE_THRESHOLD' && st.approvalThreshold === undefined) missing.push('settlement.approvalThreshold');
+  const mode = values.scheduling.mode;
+  if (mode === 'ONLINE' || mode === 'HYBRID') {
+    for (const f of BIDDING_FIELDS) if (values.bidding[f] === undefined) missing.push(`bidding.${f}`);
   }
   const dv = values.dividend;
   if (dv.divisor === 'ACTIVE_NON_PRIZED_TICKETS' && dv.winnerSharesCurrentDividend === undefined) missing.push('dividend.winnerSharesCurrentDividend');
@@ -221,8 +249,11 @@ export function resolveConfiguration(layers: PolicyLayer[], group: GroupFacts | 
 
   // ---- engine policy -------------------------------------------------------------------
   const complete = missing.length === 0;
+  // The engine's auction policy needs only the Model A fields (commission, dividend, contribution rounding).
+  const MODEL_A = /^(commission\.|dividend\.|contribution\.(rounding|differenceHandling)$)/;
+  const modelAComplete = !missing.some((m) => MODEL_A.test(m));
   let policy: ChitPolicy | null = null;
-  if (complete && !violations.some((v) => v.code === 'POLICY_INCONSISTENT')) {
+  if (modelAComplete && !violations.some((v) => v.code === 'POLICY_INCONSISTENT')) {
     const candidate: ChitPolicy = {
       policyVersion: 1,
       name: 'RESOLVED',
