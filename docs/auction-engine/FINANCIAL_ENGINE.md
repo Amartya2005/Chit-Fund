@@ -105,6 +105,11 @@ Constraint: `Dmin ≤ D ≤ Dmax`, `D < C`, and (A1) `D ≥ F` unless D-11/D-13 
 `F = 25,000.00; Dpool = 25,000.00; d = R↓(833.333…) = 833.33; r = 25,000.00 − 833.33 × 30 = ₹0.10; G = 4,50,000.00`.
 Existing code: `dividendPerMember = 833.33`, ₹0.10 is lost. Proposed: ₹0.10 to the rounding reserve and added to the next dividend pool.
 
+**P0 implementation (existing workflow, `backend/src/modules/auctions/auctionCalculation.ts`, version `p0-1`):**
+the A1 formula above is computed in integer paise (`F` half-up, `d` truncated to the paisa), the divisor is still `maxMembers` (existing behaviour, D-03 open), and every paisa of `Dpool` is allocated:
+`TICKET_CREDIT = d` per ACTIVE ticket (target instalment k+1) · `VACANT_SEATS = d × (maxMembers − active)` · `ROUNDING_REMAINDER = r` · or, when instalment k+1 does not exist, `NO_NEXT_INSTALLMENT = Dpool`. Non-credited rows are `PENDING_DECISION`. Invalid results are refused, never settled: `COMMISSION_EXCEEDS_DISCOUNT` (D < F), `DISCOUNT_OUT_OF_RANGE`, `ACTIVE_TICKETS_EXCEED_SEATS`, `DIVIDEND_EXCEEDS_NEXT_INSTALLMENT`. The calculation inputs and step breakdown are stored on `Auction.calculation`.
+Verified examples (unit tests): A-2 above; 4 active of 10 seats → ₹4,000 credited + ₹6,000 `VACANT_SEATS`; ₹5,00,000 / 30 seats, D ₹50,000 → ₹833.33 × 30 + ₹0.10 remainder; 3 seats, D ₹6,000 → ₹333.33 × 3 + ₹0.01; 2.5 % of ₹3,33,333.33 = ₹8,333.33.
+
 ### 3.4 Variant A2 (commission deducted from prize) [PROPOSED alternative, D-13]
 ```
 F     = R½(C × c%)        Dpool = D        G = C − D − F
@@ -121,7 +126,7 @@ due(t, k).net         = gross − dividend + penalty
 due(t, k).outstanding = net − Σ allocations(t, k)                  (≥ 0)
 outstanding(t, asOf)  = Σ_{k : dueDate(k) ≤ asOf} due(t, k).outstanding
 ```
-Fixes E7: only periods with `dueDate ≤ asOf` count as arrears; future periods are "upcoming".
+Fixes E7: only periods with `dueDate < asOf` count as arrears (due today is *due*, not overdue); future periods are "upcoming". **P0** already applies this rule to the existing group-level schedule (`backend/src/modules/subscribers/arrears.ts`).
 
 ### 3.6 Commission shortfall when D < F (existing inconsistency E6)
 Under A1 the cash actually available to fund commission in an auction is `min(D, F)`. Lifecycle example A-4 (10 tickets, ₹1,00,000, 5 %, discounts 15,000 / 12,000 / 10,000 / 9,000 / 8,000 / 7,000 / 6,000 / 5,000 / 5,000 / 0, dividend credited next period, divisor 10):
@@ -140,7 +145,7 @@ Under A1 the cash actually available to fund commission in an auction is `min(D,
 | 10 | 0 | 5,000 | 0 | 0 | 10,000 | 1,00,000 | 1,00,000 | 0 |
 | **Σ** | 77,000 | **50,000** | 32,000 | | | 9,68,000 | 9,23,000 | **45,000** |
 
-Cash left with the foreman = ₹45,000, but recorded commission = ₹50,000 → ₹5,000 overstated (auction 10, where `D = 0 < F`). The last auction's dividend (if any) would also have no period to be credited to (E5). Options (D-11, D-13): (a) enforce `D ≥ F` for every auction (UI rule today); (b) commission = `min(F, D)`; (c) shortfall recorded as receivable from the group / borne by foreman; (d) last-auction special rule defined by the chit agreement. **No default is assumed.**
+Cash left with the foreman = ₹45,000, but recorded commission = ₹50,000 → ₹5,000 overstated (auction 10, where `D = 0 < F`). The last auction's dividend (if any) would also have no period to be credited to (E5). **P0:** the backend now enforces (a) for the existing workflow — such auctions cannot be settled until D-11/D-13 are decided. Options (D-11, D-13): (a) enforce `D ≥ F` for every auction (UI rule, now also backend); (b) commission = `min(F, D)`; (c) shortfall recorded as receivable from the group / borne by foreman; (d) last-auction special rule defined by the chit agreement. **No default is assumed.**
 
 ### 3.7 Auction frequency vs contribution frequency (D-06)
 The engine models **auction periods** and **contribution periods** as two independent calendars linked by a mapping rule:

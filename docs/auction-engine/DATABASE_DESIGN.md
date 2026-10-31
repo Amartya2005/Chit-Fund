@@ -18,6 +18,12 @@ Baseline: Prisma schema at `4d6daa8` (27 tables, 4 migrations; money `NUMERIC(15
 
 ---
 
+## 1a. Already implemented in P0 (migration `20261101000000_p0_ticket_history_auction_integrity`)
+* `ChitGroupMember.status` (`ACTIVE | SURRENDERED | EXITED`, CHECK), `exitedAt`, `exitReason`, `exitRefundId` — the soft-exit design of §9 is in place; surrender no longer deletes rows.
+* `Auction.winnerMemberId` (FK → ticket), `Auction.calculation` (JSONB breakdown), `Auction.calculationVersion`; CHECK non-negative amounts (`NOT VALID` for pre-P0 rows).
+* `AuctionDividendAllocation` (`allocationKey` non-null, unique `(auctionId, allocationKey)`; kinds `TICKET_CREDIT | VACANT_SEATS | ROUNDING_REMAINDER | NO_NEXT_INSTALLMENT`; status `CREDITED_TO_INSTALLMENT | PENDING_DECISION`). This is a P0-scoped precursor of `DividendRecord` (§5); when the engine arrives, these rows are migrated/linked rather than recomputed.
+* Not added in P0: `prizedAt` / `prizedSessionId` on `ChitGroupMember` (prized status is derived from `Auction` rows).
+
 ## 2. Reuse of existing models
 
 | Existing model | Reuse |

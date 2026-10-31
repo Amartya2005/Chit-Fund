@@ -37,20 +37,27 @@ Status: **awaiting approval.** Each item lists alternatives and, where reasonabl
 
 | Ref | Existing behaviour | Conflict | Decision needed |
 |---|---|---|---|
-| E1 | Manager UI sends `winningSubscriberId`; API expects `winnerSubscriberId` | in-app auction recording fails (400) | Fix in P0 (UI change) — approve |
-| E2 | UI expects `isPrized` etc. that the API never returns | eligibility display wrong | Derive from `Auction` (P0) and later from `ChitGroupMember.prizedAt` |
-| E3 | Same member can win multiple auctions | contract integrity | D-04 |
-| E4 | Dividend ÷ `maxMembers`, remainder dropped | vacant tickets' share and remainders unallocated | D-03 |
-| E5 | Last auction's dividend never credited | money retained silently | D-07 / D-11 |
-| E6 | Backend records commission F even if D < F; UI forbids D < F | commission overstated | D-11 / D-13 |
-| E7 | Arrears include future instalments | members wrongly shown in arrears | Fix in P3 (dues engine) — approve |
-| E8 | Hard-coded statements, bankbook split, opening balances | not real data | D-20 |
-| E9 | Financial periods and compliance data in memory/static | no real locking | D-20 |
-| E10 | INR shown with western grouping | display | Fix in P0 — approve |
-| E11 | Surrender deletes ticket membership row | ticket history lost | Soft exit for engine groups (DATABASE_DESIGN §9) — approve |
+| E1 | Manager UI sent `winningSubscriberId`; API expected `winnerSubscriberId` | in-app auction recording failed (400) | **Resolved in P0** (alias accepted, UI fixed) |
+| E2 | UI expected `isPrized` etc. that the API never returned | eligibility display wrong | **Resolved in P0** (derived from `Auction` rows; eligibility endpoint) |
+| E3 | Same member can win multiple auctions | contract integrity | **Still open — D-04.** Kept permitted and made explicit in P0 |
+| E4 | Dividend ÷ `maxMembers`, remainder dropped | vacant tickets' share and remainders unallocated | **Amounts preserved in P0** (`PENDING_DECISION`); distribution still needs D-03 |
+| E5 | Last auction's dividend never credited | money retained silently | **Amount preserved in P0** (`NO_NEXT_INSTALLMENT`); destination needs D-07 / D-11 |
+| E6 | Backend recorded commission F even if D < F | commission overstated | **Resolved in P0** (settlement refused); how such auctions *should* be handled needs D-11 / D-13 |
+| E7 | Arrears included future instalments | members wrongly shown in arrears | **Resolved in P0** |
+| E8 | Hard-coded statements, bankbook split, opening balances | not real data | **Labelled/removed in P0** (`null` + `dataQuality`); ledger-based figures need D-19/D-20 and P4 |
+| E9 | Financial periods and compliance data in memory/static | no real locking | **Labelled in P0** (demonstration banner; invented audit entries removed); persistence needs D-20 |
+| E10 | INR shown with western grouping | display | **Partially resolved in P0** (auction screen) |
+| E11 | Surrender deleted ticket membership row | ticket history lost | **Resolved in P0** (status `SURRENDERED`); rows deleted before P0 are not recoverable |
 | — | `ChitGroup.auctionFrequency` column exists but is unused | misleading | Keep for compatibility; superseded by `AuctionSchedule` |
 | — | `AuctionBid` table exists but is unused | — | D-30 |
 | — | Display-only "2 % late fee" in outstanding report | not charged, not configurable | D-22 |
+
+### 2a. New decisions surfaced by P0
+| ID | Question | Notes |
+|---|---|---|
+| D-35 | What happens to `PENDING_DECISION` dividend allocations already recorded (unfilled seats, remainders, final auctions)? | Visible via `GET /auctions/dividend-allocations/pending`; not posted anywhere. Needs D-03/D-07/D-11 and then an approved, auditable application (adjustment), never a silent update. |
+| D-36 | Should KYC verification or overdue dues block auction eligibility in the existing workflow? | P0 reports KYC as informational only and does not check dues (not existing behaviour). |
+| D-37 | Should a surrendered member be allowed to re-enrol in the same group? | P0 refuses re-enrolment (unique ticket-per-subscriber constraint kept). |
 
 ## 3. Legal and regulatory validation (L-xx) — to be answered by qualified counsel / CA
 

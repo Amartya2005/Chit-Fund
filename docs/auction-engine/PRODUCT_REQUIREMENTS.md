@@ -49,6 +49,22 @@ Conventions used in all documents of this folder:
 | E10 | Currency in the UI is formatted with `toLocaleString()` without the `en-IN` locale (e.g. "₹100,000" instead of "₹1,00,000"). | INR formatting inconsistent. |
 | E11 | Surrender approval deletes the `ChitGroupMember` row. | Ticket history (who held ticket #n, prized status) is lost. |
 
+### 1.2 P0 status (branch `claude/p0-auction-integrity`)
+
+| # | P0 outcome |
+|---|---|
+| E1 | **Fixed.** API accepts `winnerSubscriberId` and the legacy `winningSubscriberId`; UI sends the documented name. |
+| E2 | **Fixed.** Ticket status, prized flags and eligibility reasons come from `GET /auctions/group/:groupId/eligibility` and group details. |
+| E3 | **Unchanged by design** — repeat wins remain permitted and are now explicit (`repeatWinPolicy = PERMITTED_PENDING_DECISION_D04`). Awaits D-04 / L-03. |
+| E4, E5 | **Amounts preserved, distribution unchanged.** `AuctionDividendAllocation` records every paisa; unfilled-seat shares, rounding remainders and final-auction dividends are `PENDING_DECISION` (D-03, D-07, D-11). |
+| E6 | **Fixed.** Settlement refused when commission > discount (`COMMISSION_EXCEEDS_DISCOUNT`); no formula change. |
+| E7 | **Fixed.** Only instalments past their due date are overdue. |
+| E8, E9 | **Fixed (labelling).** Sample figures replaced by `null` + `dataQuality`; compliance data marked as demonstration; invented audit entries removed. Ledger-based figures still require P4. |
+| E10 | **Partially fixed** (auction screen, new report states). |
+| E11 | **Fixed.** Surrender keeps the ticket with `status = SURRENDERED`. |
+
+Eligibility rules enforced server-side in P0 (existing auction workflow): ticket ACTIVE; subscriber ACTIVE. Informational only: already prized, KYC not verified. Everything else in FR-ELG remains future work.
+
 ---
 
 ## 2. Goals and non-goals
