@@ -67,6 +67,8 @@ Idempotency-Key: 6f1d…
 
 Differences from the proposal: no `Idempotency-Key` storage yet (activation and rejection are naturally idempotent/state-checked; a duplicated create produces a harmless extra DRAFT); `A` (approver) role not separated (D-14). New error codes are only used on these new routes.
 
+**P3–P10 implementation status:** all engine endpoints are registered in `backend/src/engine/routes.ts` under `/api/v1/engine/*` and `/api/v1/me/member/*` (≈ 70 routes; the P10 security test discovers them from the router and checks 401 / role / member scope / cross-company 404 for each). Operating guide: `ENGINE_RUNBOOK.md`. Realtime = SSE windows of 25 s plus polling (`/live?afterSeq=`), so no long-running server is required (D-33).
+
 ---
 
 ## 3. Scheduling

@@ -201,7 +201,12 @@ The service applies the plan in one database transaction guarded by a unique set
 
 ---
 
+## 3.10 P3–P8 implementation notes
+Engine groups apply this chapter end to end: contributions from the agreed schedule, dues per ticket (§3.5), the auction outcome from §3.3/3.4 with the session's frozen policy, credit to the target instalment per `dividend.timing`, every paisa recorded as a `DividendRecord`, prize deductions per D-15, and the posting rules of §6.4 (rules v1). Reproducibility: every settlement stores a `CalculationRun` (inputs, policy, outputs, hashes) and `GET /engine/settlements/:id` re-runs it.
+
 ## 4. Model B — Interest engine (independent)
+
+**P9 status:** implemented in `backend/src/finance/interest/` (golden tests reproduce B-0 to B-7 exactly) and `/api/v1/engine/interest/*`, **locked** for every company until the super admin enables it with a written legal attestation. Flat-rate products do not support prepayment rescheduling; interest is recognised when received (cash basis) pending CA review.
 
 ### 4.1 Scope and subject (D-25)
 The engine operates on an abstract **interest-bearing account**: `principal`, `disbursementDate`, `product snapshot`, ledger of events. What business product uses it (loans to members, loans against unprized tickets, advances, overdue interest on non-chit receivables) is a decision with **significant regulatory impact** (L-07..L-10). The engine itself is product-agnostic and is never invoked for chit contributions or discounts.

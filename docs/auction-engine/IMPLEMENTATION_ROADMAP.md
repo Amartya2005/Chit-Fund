@@ -50,6 +50,23 @@ Critical path for **offline configurable auctions with daily/weekly/monthly sche
 * **Tests:** 37 new (12 unit, 25 integration incl. roles, tenant isolation, legal limits, DB triggers, concurrency); 235/235. Mutation check: removing the per-company advisory lock makes the concurrency tests fail.
 * **Not decided by P2:** who may activate settings (D-14: the activating user is recorded, no maker–checker), the lock point (D-08), legal limit values (L-01/L-02), and every Model A business rule (only selectable). New questions: D-38, D-39 in OPEN_DECISIONS.
 
+### P3–P10 status — implemented (branch `claude/engine-p3-p10`)
+
+All remaining phases were built in one branch, one commit per phase (P5 and P6 together), on top of P2. Every business decision stays a policy option with no default; features that depend on an undecided rule refuse to run until it is set. Operating guide: `ENGINE_RUNBOOK.md`.
+
+| Phase | Delivered | Migration | Notes / deviations |
+|---|---|---|---|
+| P3 Dues & allocation | per-ticket dues, payment allocation (TAGGED_PERIOD / OLDEST_FIRST), penalties (PENALTY policy), waivers with optional second approver, legacy-group conversion with dry run + exact reconciliation, surrender removes untouched future dues | `20261103000000_p3_member_dues` | business dates as `YYYY-MM-DD` strings (D-21 → existing convention); engine money stays `Prisma.Decimal` end to end |
+| P4 Accounting | FinancialEvent + posting engine (rules v1), account mapping, cut-over, period locks (DB trigger, also for manual entries), ledger trial balance | `20261104000000_p4_accounting_posting` | rules need CA review (L-12); waived contributions are recorded but not posted |
+| P5 Sessions | recurrence calendar with holidays, schedules, idempotent materialiser + cron endpoint, session lifecycle, frozen config per session (D-08), result entry with engine preview, approvals, settlement (dues credit, legacy Auction/Payout projections, events), reversal + re-settlement, engine payouts with prize deductions | `20261105000000_p5_auction_sessions` | ScheduleException table not built (postpone acts on materialised sessions) |
+| P6 Eligibility | ELIGIBILITY rules (active ticket, max wins, max overdue, KYC), stored decisions at open, overrides only for listed rules | `20261105000100_p6_eligibility_decisions` | |
+| P7 Member portal | MEMBER role confined to the member API, per-company switch (D-02), member logins, member app | `20261106000000_p7_member_portal` | invitations by manager-set password (no e-mail invite flow) |
+| P8 Online bidding | bids with row lock + DB clock, engine discount checks, open/sealed, anti-sniping, idempotency, live state + SSE, member auction room, manager live monitor | `20261107000000_p8_online_bidding` | realtime = SSE windows + polling (works on serverless hosting; D-33 not needed) |
+| P9 Interest engine | library (B-0..B-7 golden), products, accounts, schedules, repayments with waterfall and prepayment, penal/late fees, events — **locked** per company until the super admin records the legal sign-off | `20261108000000_p9_interest_engine` | flat products: no prepayment rescheduling; interest recognised when received (cash basis) |
+| P10 Reports & hardening | auction / arrears / pending-decision reports, ledger statements, write rate limits, route-level security sweep | — | |
+
+Verification: 334 automated tests (unit, property, integration on PostgreSQL), web UI checked in the browser at desktop and phone widths, all migrations applied to the Supabase dev project with matching schema fingerprints. Not done: load test (P8), production deployment.
+
 ## 3. Dependency graph
 ```
 P0 ─▶ P1 ─▶ P2 ─▶ P3 ─▶ P4 ─▶ P5 ─▶ P6 ─▶ P8

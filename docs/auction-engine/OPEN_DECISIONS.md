@@ -83,6 +83,35 @@ Status: **awaiting approval.** Each item lists alternatives and, where reasonabl
 
 P2 applied the DATABASE_DESIGN recommendation for D-29 (PostgreSQL enums for the new tables only) and D-21 is not affected (no date columns besides timestamps). D-08 (lock point) is still open: the snapshot mechanism exists, nothing calls it yet.
 
+### 2d. P3–P10: decisions represented as options, and new questions
+
+| Decision | Where it is chosen | Options implemented |
+|---|---|---|
+| D-04 max wins | `ELIGIBILITY.maxWinsPerTicket` | a number or `UNLIMITED` (never overridable) |
+| D-06 frequencies | schedules | any calendar; dividends go to the next/same instalment by date; funding gaps of M2/M3 are **not** handled — a warning is shown when more auctions are planned than tickets can win (D-10) |
+| D-08 lock point | `SCHEDULING.lockPoint` | AT_OPEN / AT_RESULT_ENTRY (online auctions always lock at open) |
+| D-11 no bid | `SCHEDULING.noBidRule` | CANCEL_SESSION / CARRY_FORWARD (carry forward = marked, nothing moved) |
+| D-12 online format | `BIDDING.*` | open ascending / sealed; earliest bid wins ties; bidder shown by ticket number or name; anti-sniping window, extension, maximum |
+| D-14 approvals | `SETTLEMENT.settlementApproval`, `adjustmentApproval` | none / second person / above a prize threshold |
+| D-15 prize deductions | `SETTLEMENT.prizeDeductions` | none / overdue dues (settled from the prize at disbursal, oldest first) |
+| D-16 proxy bidding | `BIDDING.proxyBidding` | not allowed / manager on behalf (audited) |
+| D-19 cut-over | `PUT /engine/accounting/cutover` | per company; fixed after the first posting; opening balances via a manual journal entry |
+| D-22 penalties | `PENALTY.*` | none / flat per missed instalment / % of overdue; grace days; cap |
+| D-23 allocation | `CONTRIBUTION.paymentAllocation` | tagged instalment / oldest first |
+| D-02 member access | super admin switch per company | MEMBER role (option a) |
+| D-25 interest engine | super admin switch with attestation | locked by default |
+
+New questions surfaced while building:
+
+| ID | Question | Current behaviour |
+|---|---|---|
+| D-40 | Accounting treatment of a waived contribution (who bears it) | recorded as `DUE_WAIVED`, never posted (`RULE_NEEDS_DECISION`) |
+| D-41 | Paying dividends in cash (`dividend.timing = CASH_PAYOUT`) | credited to *dividend payable*; there is no cash payout flow yet |
+| D-42 | A monthly day beyond the month's length (e.g. 31) | treated as the month's last day (documented in the calendar) |
+| D-43 | Legacy payments of tickets that already left a group | kept as `LEGACY_EXITED_TICKET` at conversion; not applied to any due |
+| D-44 | Overpayments after a dividend is credited to an already-paid instalment | shown as *overpaid* on the due; not moved automatically |
+| D-45 | Should online auctions close themselves without the scheduler/manager acting? | they close when the scheduler (cron) or a manager acts after the closing time |
+
 ## 3. Legal and regulatory validation (L-xx) — to be answered by qualified counsel / CA
 
 | ID | Question | Why it matters |

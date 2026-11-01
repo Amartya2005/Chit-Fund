@@ -32,6 +32,11 @@ Baseline: Prisma schema at `4d6daa8` (27 tables, 4 migrations; money `NUMERIC(15
 * Existing delete flows refuse to delete a group, or hard-delete a company, that has configuration history (soft delete / status change instead).
 * Not in P2: `FinancialPeriod`, `AccountMapping` (P4).
 
+## 1c. Implemented in P3–P10 (migrations `20261103…` to `20261108…`)
+* As designed, with these differences: business dates are `YYYY-MM-DD` strings (existing convention, D-21); `MemberDue` has no stored status (derived as of a date); `PaymentAllocation` buckets are `DUE / ADVANCE / LEGACY_EXITED_TICKET`; `PenaltyCharge`, `EngineConversion`, `AuctionSessionEvent`, `InterestProduct`, `InterestCharge` added; `ScheduleException`, `HolidayCalendar`, `PostingRuleVersion` (rules are versioned in code), `CommissionRecord` (fields on `AuctionSettlement`) and `RateChange` not built.
+* Every financial table is append-only or state-machine guarded by triggers; every new table has RLS enabled; money columns of engine tables stay exact decimals in the API (strings).
+* Legacy `Auction` / `Payout` rows are created as projections of an engine `AuctionSettlement` so existing screens and reports keep working; a reversal removes the projection (payout must still be pending) and keeps the settlement as history.
+
 ## 2. Reuse of existing models
 
 | Existing model | Reuse |
