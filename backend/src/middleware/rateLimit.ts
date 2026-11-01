@@ -48,3 +48,18 @@ export const bidLimiter = make({
   keyGenerator: (req: Request) => (req as Request & { user?: { id: string } }).user?.id ?? 'anonymous',
   message: { success: false, code: 'TOO_MANY_BIDS', message: 'Too many bids. Please wait a moment.' },
 });
+
+/** Engine write operations (results, settlements, conversions, configuration): 60 per minute per user. */
+export const engineWriteLimiter = make({
+  windowMs: 60 * 1000,
+  limit: 60,
+  keyGenerator: (req: Request) => (req as Request & { user?: { id: string } }).user?.id ?? 'anonymous',
+  message: { success: false, code: 'TOO_MANY_REQUESTS', message: 'Too many changes in a short time. Please wait a moment.' },
+});
+
+/** Calculation previews: 30 per minute per user (API_DESIGN §11). */
+export const previewLimiter = make({
+  windowMs: 60 * 1000,
+  limit: 30,
+  keyGenerator: (req: Request) => (req as Request & { user?: { id: string } }).user?.id ?? 'anonymous',
+});
