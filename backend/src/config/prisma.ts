@@ -51,6 +51,10 @@ export const ENGINE_DECIMAL_MODELS: readonly string[] = [
   'FinancialEvent',
   'AuctionSettlement',
   'DividendRecord',
+  'InterestAccount',
+  'RepaymentInstallment',
+  'InterestCharge',
+  'InterestRepayment',
 ];
 
 function createClient() {

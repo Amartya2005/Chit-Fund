@@ -18,6 +18,10 @@ export const ACCOUNT_ROLES = [
   'DIVIDEND_PAYABLE',
   'DIVIDEND_UNALLOCATED',
   'PENALTY_INCOME',
+  // Model B (interest engine, P9)
+  'LOAN_RECEIVABLE',
+  'INTEREST_INCOME',
+  'FEE_INCOME',
 ] as const;
 export type AccountRole = (typeof ACCOUNT_ROLES)[number];
 
@@ -30,6 +34,7 @@ export const SUGGESTED_ACCOUNT_CODES: Partial<Record<AccountRole, string>> = {
   PRIZE_PAYABLE: '2001',
   COMMISSION_INCOME: '4001',
   PENALTY_INCOME: '4002',
+  FEE_INCOME: '4003',
 };
 
 export type EventType =
@@ -43,7 +48,9 @@ export type EventType =
   | 'PRIZE_DISBURSED'
   | 'PENALTY_CHARGED'
   | 'PENALTY_WAIVED'
-  | 'DUE_WAIVED';
+  | 'DUE_WAIVED'
+  | 'LOAN_DISBURSED'
+  | 'LOAN_REPAYMENT';
 
 export interface RuleLine {
   role: AccountRole;
@@ -86,6 +93,19 @@ export function linesFor(type: EventType, p: Record<string, any>): RuleResult {
       break;
     case 'PENALTY_WAIVED':
       lines = [L('PENALTY_INCOME', 'DEBIT', a('amount')), L('SUBSCRIBER_RECEIVABLE', 'CREDIT', a('amount'))];
+      break;
+    case 'LOAN_DISBURSED':
+      lines = [L('LOAN_RECEIVABLE', 'DEBIT', a('principal')), L(cashOrBank(p.mode), 'CREDIT', a('principal'))];
+      break;
+    case 'LOAN_REPAYMENT':
+      // interest recognised when received (cash basis) — to be confirmed with the CA (L-12)
+      lines = [
+        L(cashOrBank(p.mode), 'DEBIT', a('total')),
+        L('LOAN_RECEIVABLE', 'CREDIT', a('principal')),
+        L('INTEREST_INCOME', 'CREDIT', a('interest')),
+        L('PENALTY_INCOME', 'CREDIT', a('penal')),
+        L('FEE_INCOME', 'CREDIT', a('fees')),
+      ];
       break;
     case 'DUE_WAIVED':
       // Who bears a waived contribution (the foreman, the group pool, a loss) is not decided.

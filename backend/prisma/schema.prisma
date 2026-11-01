@@ -39,17 +39,22 @@ model Company {
   sequences      CompanySequence[]
 
   // P2 configuration system. engineEnabled is an inert flag until engine groups exist (P5).
-  engineEnabled       Boolean                  @default(false)
+  engineEnabled             Boolean                  @default(false)
   // P4: ledger posting starts at this business date (D-19); null = automatic posting off
-  ledgerCutoverDate   String?
+  ledgerCutoverDate         String?
   // P7: members can sign in only when the super admin enables the portal for the company (D-02)
-  memberPortalEnabled Boolean                  @default(false)
-  accountMappings     AccountMapping[]
-  financialEvents     FinancialEvent[]
-  financialPeriods    FinancialPeriod[]
-  policyVersions      FinancialPolicyVersion[]
-  policyPointers      PolicyPointer[]
-  configSnapshots     ConfigSnapshot[]
+  memberPortalEnabled       Boolean                  @default(false)
+  // P9: interest engine (Model B) is LOCKED until the super admin records the legal sign-off (D-25, L-07..L-09)
+  interestEngineEnabled     Boolean                  @default(false)
+  interestEngineAttestation String?
+  interestEngineEnabledById String?
+  interestEngineEnabledAt   DateTime?
+  accountMappings           AccountMapping[]
+  financialEvents           FinancialEvent[]
+  financialPeriods          FinancialPeriod[]
+  policyVersions            FinancialPolicyVersion[]
+  policyPointers            PolicyPointer[]
+  configSnapshots           ConfigSnapshot[]
 }
 
 model User {
@@ -1206,4 +1211,112 @@ model AuctionSessionEvent {
   session AuctionSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
 
   @@unique([sessionId, seq])
+}
+
+// ---------------------------------------------------------------------------
+// P9 — Interest engine (Model B, migration M7). Separate from every chit table (FINANCIAL_ENGINE §4.5).
+// Usable only when Company.interestEngineEnabled (super admin, with legal attestation).
+// ---------------------------------------------------------------------------
+
+/// Immutable product versions (terms validated; no defaults).
+model InterestProduct {
+  id          String   @id @default(uuid())
+  companyId   String
+  code        String
+  version     Int
+  name        String
+  terms       Json
+  createdById String
+  createdAt   DateTime @default(now())
+
+  accounts InterestAccount[]
+
+  @@unique([companyId, code, version])
+}
+
+model InterestAccount {
+  id               String    @id @default(uuid())
+  companyId        String
+  accountNo        String
+  subscriberId     String
+  productId        String
+  /// product terms frozen when the account is created
+  terms            Json
+  principal        Decimal   @db.Decimal(15, 2)
+  termMonths       Int
+  firstDueDate     String
+  disbursedOn      String?
+  disbursementMode String?
+  /// DRAFT | ACTIVE | CLOSED
+  status           String    @default("DRAFT")
+  scheduleVersion  Int       @default(0)
+  createdById      String
+  createdAt        DateTime  @default(now())
+  closedAt         DateTime?
+
+  product      InterestProduct        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  installments RepaymentInstallment[]
+  charges      InterestCharge[]
+  repayments   InterestRepayment[]
+
+  @@unique([companyId, accountNo])
+  @@index([companyId, status])
+  @@index([subscriberId])
+}
+
+model RepaymentInstallment {
+  id              String  @id @default(uuid())
+  companyId       String
+  accountId       String
+  scheduleVersion Int
+  installmentNo   Int
+  dueDate         String
+  principal       Decimal @db.Decimal(15, 2)
+  interest        Decimal @db.Decimal(15, 2)
+  paidPrincipal   Decimal @default(0) @db.Decimal(15, 2)
+  paidInterest    Decimal @default(0) @db.Decimal(15, 2)
+  /// replaced by a later schedule version (prepayment)
+  superseded      Boolean @default(false)
+
+  account InterestAccount  @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  charges InterestCharge[]
+
+  @@unique([accountId, scheduleVersion, installmentNo])
+  @@index([companyId, dueDate])
+}
+
+model InterestCharge {
+  id            String   @id @default(uuid())
+  companyId     String
+  accountId     String
+  installmentId String?
+  /// PENAL | LATE_FEE | PREPAYMENT_FEE
+  kind          String
+  amount        Decimal  @db.Decimal(15, 2)
+  paidAmount    Decimal  @default(0) @db.Decimal(15, 2)
+  chargeKey     String   @unique
+  asOf          String
+  createdAt     DateTime @default(now())
+
+  account     InterestAccount       @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  installment RepaymentInstallment? @relation(fields: [installmentId], references: [id], onDelete: Restrict)
+
+  @@index([accountId])
+  @@index([installmentId])
+}
+
+model InterestRepayment {
+  id          String   @id @default(uuid())
+  companyId   String
+  accountId   String
+  amount      Decimal  @db.Decimal(15, 2)
+  mode        String
+  receivedOn  String
+  allocation  Json
+  createdById String
+  createdAt   DateTime @default(now())
+
+  account InterestAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([accountId])
 }

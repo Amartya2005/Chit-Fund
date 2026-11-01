@@ -5,6 +5,7 @@ import * as acct from './accounting/accounting.controller.js';
 import * as ses from './sessions/sessions.controller.js';
 import * as mem from './member/member.controller.js';
 import * as bid from './bidding/bidding.controller.js';
+import * as int from './interest/interest.controller.js';
 import { bidLimiter } from '../middleware/rateLimit.js';
 
 const SA = 'SUPER_ADMIN';
@@ -81,4 +82,15 @@ export function registerEngineRoutes(router: Router) {
   router.get('/engine/sessions/:id/live', ...auth(SA, M, S), bid.staffLive);
   router.post('/engine/sessions/:id/bids', ...auth(SA, M), bidLimiter, bid.managerBid);
   router.post('/engine/sessions/:id/result-from-bids', ...auth(SA, M), bid.resultFromBids);
+
+  // P9 — interest engine (Model B), locked per company until the super admin records the legal sign-off
+  router.patch('/engine/companies/:id/interest-engine', ...auth(SA), int.setInterestEngine);
+  router.get('/engine/interest/status', ...auth(SA, M), int.interestStatus);
+  router.get('/engine/interest/products', ...auth(SA, M), int.listProducts);
+  router.post('/engine/interest/products', ...auth(SA, M), int.createProduct);
+  router.post('/engine/interest/accounts', ...auth(SA, M), int.createAccount);
+  router.get('/engine/interest/accounts/:id', ...auth(SA, M), int.getAccount);
+  router.post('/engine/interest/accounts/:id/disburse', ...auth(SA, M), int.disburseAccount);
+  router.post('/engine/interest/accounts/:id/repayments', ...auth(SA, M), int.repayAccount);
+  router.post('/engine/interest/accounts/:id/penal-run', ...auth(SA, M), int.runPenal);
 }
