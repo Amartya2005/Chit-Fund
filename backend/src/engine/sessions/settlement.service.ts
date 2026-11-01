@@ -22,7 +22,7 @@ export async function lockSession(tx: Tx, sessionId: string) {
 }
 
 /** The frozen configuration of a session (locks it now if the lock point has not been reached yet). */
-export async function sessionSnapshot(tx: Tx, session: { id: string; companyId: string; groupId: string; configSnapshotId: string | null }, userId: string) {
+export async function sessionSnapshot(tx: Tx, session: { id: string; companyId: string; groupId: string; configSnapshotId: string | null }, userId: string | null) {
   if (session.configSnapshotId) return tx.configSnapshot.findUniqueOrThrow({ where: { id: session.configSnapshotId } });
   const { snapshot } = await lockConfigSnapshot(tx, { companyId: session.companyId, subjectType: 'AUCTION_SESSION', subjectId: session.id, groupId: session.groupId, lockedById: userId });
   await tx.auctionSession.update({ where: { id: session.id }, data: { configSnapshotId: snapshot.id } });
@@ -143,6 +143,14 @@ export async function submitResult(tx: Tx, sessionId: string, winnerMemberId: un
   await lockGroupRow(tx, s0.groupId);
   const session = await lockSession(tx, sessionId);
   if (session.status !== 'CLOSED') throw new HttpError(409, `Results can be entered only for a closed auction (this one is ${session.status}).`, 'INVALID_STATE');
+  if (session.mode !== 'OFFLINE') {
+    // online / hybrid: the result is the best accepted bid (highest discount, earliest on ties — D-12)
+    const best = await tx.auctionBid.findFirst({ where: { sessionId, status: 'ACCEPTED' }, orderBy: [{ bidDiscount: 'desc' }, { sequenceNo: 'asc' }] });
+    if (!best) throw new HttpError(409, 'No bids were accepted; record a no-bid outcome instead.', 'NO_BIDS');
+    if (best.memberId !== winnerMemberId || !dec(best.bidDiscount as any).equals(String(discount))) {
+      throw new HttpError(409, 'The result of an online auction must be its best bid.', 'RESULT_MUST_MATCH_BEST_BID', { memberId: best.memberId, discount: dec(best.bidDiscount as any).toFixed(2) });
+    }
+  }
   const c = await computeResult(tx, sessionId, winnerMemberId, discount, userId);
   if (!c.outcome.valid) throw new HttpError(422, c.outcome.errors.map((e) => e.message).join(' '), 'RESULT_INVALID', { errors: c.outcome.errors, outcome: c.outcome });
 
@@ -268,6 +276,10 @@ export async function applySettlement(tx: Tx, settlementId: string, approverId: 
   });
   await tx.auctionSettlement.update({ where: { id: st.id }, data: { status: 'SETTLED', settledAt: new Date(), approvedById: approverId, auctionId: auction.id } });
   await tx.auctionSession.update({ where: { id: st.sessionId }, data: { status: 'SETTLED', resultAuctionId: auction.id, rowVersion: { increment: 1 } } });
+  if (st.session.mode !== 'OFFLINE') {
+    const { appendEvent } = await import('../bidding/bidding.service.js');
+    await appendEvent(tx, st.sessionId, 'SETTLED', { winnerTicketNumber: winner.ticketNumber, discount: st.winningDiscount.toFixed(2) });
+  }
 
   const on = istDate(new Date());
   await recordEvent(tx, {

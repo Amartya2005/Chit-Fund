@@ -39,3 +39,12 @@ export const refreshLimiter = make({ windowMs: 15 * 60 * 1000, limit: 60 });
 
 /** Bulk data export (super admin). */
 export const exportLimiter = make({ windowMs: 60 * 60 * 1000, limit: 30 });
+
+/** Bids: 10 per 10 seconds per signed-in user (API_DESIGN §11). Mount after authenticateToken. */
+export const bidLimiter = make({
+  windowMs: 10 * 1000,
+  limit: 10,
+  // always mounted after authenticateToken, so the user id is present
+  keyGenerator: (req: Request) => (req as Request & { user?: { id: string } }).user?.id ?? 'anonymous',
+  message: { success: false, code: 'TOO_MANY_BIDS', message: 'Too many bids. Please wait a moment.' },
+});

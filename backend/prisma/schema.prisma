@@ -356,16 +356,35 @@ model AuctionDividendAllocation {
 
 model AuctionBid {
   id           String   @id @default(uuid())
-  auctionId    String
+  /// legacy column (unused before P8); null for engine online bids
+  auctionId    String?
   subscriberId String
   bidDiscount  Decimal  @db.Decimal(15, 2)
   bidTime      DateTime @default(now())
 
-  auction    Auction    @relation(fields: [auctionId], references: [id], onDelete: Cascade)
-  subscriber Subscriber @relation(fields: [subscriberId], references: [id])
+  // P8 online bidding (engine sessions)
+  sessionId       String?
+  companyId       String?
+  memberId        String?
+  /// per-session order of accepted bids (= session event sequence); null for rejected attempts
+  sequenceNo      Int?
+  clientRequestId String?
+  /// ACCEPTED | REJECTED
+  status          String?
+  rejectReason    String?
+  /// ONLINE (member) | PROXY (manager on behalf, D-16) | FLOOR (manager-entered, hybrid)
+  source          String?
+  placedByUserId  String?
 
+  auction    Auction?        @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  subscriber Subscriber      @relation(fields: [subscriberId], references: [id])
+  session    AuctionSession? @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, sequenceNo])
+  @@unique([sessionId, memberId, clientRequestId])
   @@index([auctionId])
   @@index([subscriberId])
+  @@index([sessionId, status])
 }
 
 model Payout {
@@ -1044,9 +1063,11 @@ model AuctionSession {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  group       ChitGroup           @relation(fields: [groupId], references: [id], onDelete: Restrict)
-  schedule    AuctionSchedule?    @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  group       ChitGroup             @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  schedule    AuctionSchedule?      @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
   settlements AuctionSettlement[]
+  bids        AuctionBid[]
+  events      AuctionSessionEvent[]
 
   @@unique([scheduleId, occurrenceKey])
   @@unique([groupId, sequenceNo])
@@ -1166,4 +1187,23 @@ model EligibilityDecision {
 
   @@index([sessionId, memberId])
   @@index([companyId, evaluatedAt])
+}
+
+// ---------------------------------------------------------------------------
+// P8 — Online bidding (migration M6). Every accepted bid and lifecycle change of an online
+// session is an event with a per-session sequence number (realtime resync cursor).
+// ---------------------------------------------------------------------------
+
+model AuctionSessionEvent {
+  id        String   @id @default(uuid())
+  sessionId String
+  seq       Int
+  /// OPENED | BID | EXTENDED | CLOSED | SETTLED | CANCELLED
+  type      String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  session AuctionSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, seq])
 }

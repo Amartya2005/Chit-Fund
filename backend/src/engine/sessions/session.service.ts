@@ -5,9 +5,10 @@ import { istInstant } from '../../finance/schedule/recurrence.js';
 import { isDate, lockGroupRow, requireDecisions, requireEngineGroup } from '../common.js';
 import { lockSession, sessionSnapshot, snapshotValues } from './settlement.service.js';
 import { recordEligibility } from '../eligibility/eligibility.service.js';
+import { appendEvent, bestBid, dbNow, effectiveClose } from '../bidding/bidding.service.js';
 
 type Tx = AppTransactionClient;
-const audit = (tx: Tx, s: { companyId: string; id: string }, userId: string, action: string, details: unknown) =>
+const audit = (tx: Tx, s: { companyId: string; id: string }, userId: string | null, action: string, details: unknown) =>
   tx.auditLog.create({ data: { companyId: s.companyId, userId, action, entity: 'AuctionSession', entityId: s.id, details: JSON.stringify(details) } });
 
 function expect(status: string, allowed: string[], action: string) {
@@ -34,23 +35,31 @@ export async function createAdhocSession(tx: Tx, group: { id: string; companyId:
   return s;
 }
 
-export async function openSession(tx: Tx, id: string, userId: string) {
+export async function openSession(tx: Tx, id: string, userId: string | null) {
   const pre = await tx.auctionSession.findUniqueOrThrow({ where: { id } });
   await lockGroupRow(tx, pre.groupId);
   const s = await lockSession(tx, id);
   expect(s.status, ['SCHEDULED'], 'open');
   const eff = await requireDecisions(tx, s.companyId, s.groupId, ['scheduling']);
   let values = eff.values;
-  if (eff.values.scheduling.lockPoint === 'AT_OPEN') values = snapshotValues(await sessionSnapshot(tx, s, userId)); // D-08
+  // D-08 lock point; online/hybrid auctions always freeze their rules when bidding opens
+  if (eff.values.scheduling.lockPoint === 'AT_OPEN' || s.mode !== 'OFFLINE') values = snapshotValues(await sessionSnapshot(tx, s, userId));
   await tx.auctionSession.update({ where: { id }, data: { status: 'OPEN', rowVersion: { increment: 1 } } });
+  if (s.mode !== 'OFFLINE') await appendEvent(tx, id, 'OPENED', { closesAt: s.closesAt.toISOString() });
   const eligibility = await recordEligibility(tx, s, values, userId);
   await audit(tx, s, userId, 'AUCTION_SESSION_OPENED', { lockPoint: eff.values.scheduling.lockPoint, eligible: eligibility.filter((e) => e.eligible).length, total: eligibility.length });
   return tx.auctionSession.findUniqueOrThrow({ where: { id } });
 }
 
-export async function closeSession(tx: Tx, id: string, userId: string) {
+export async function closeSession(tx: Tx, id: string, userId: string | null) {
   const s = await lockSession(tx, id);
   expect(s.status, ['OPEN'], 'close');
+  if (s.mode !== 'OFFLINE') {
+    // bidders were promised the published closing time
+    if ((await dbNow(tx)) < effectiveClose(s)) throw new HttpError(409, 'Online bidding is still running; it closes at the published time.', 'TOO_EARLY');
+    const best = await bestBid(tx, id);
+    await appendEvent(tx, id, 'CLOSED', { bids: await tx.auctionBid.count({ where: { sessionId: id, status: 'ACCEPTED' } }), best: best ? { amount: best.bidDiscount.toString(), seq: best.sequenceNo } : null });
+  }
   await tx.auctionSession.update({ where: { id }, data: { status: 'CLOSED', rowVersion: { increment: 1 } } });
   await audit(tx, s, userId, 'AUCTION_SESSION_CLOSED', {});
   return tx.auctionSession.findUniqueOrThrow({ where: { id } });

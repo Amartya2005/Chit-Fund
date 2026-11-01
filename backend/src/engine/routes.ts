@@ -4,6 +4,8 @@ import * as dues from './dues/dues.controller.js';
 import * as acct from './accounting/accounting.controller.js';
 import * as ses from './sessions/sessions.controller.js';
 import * as mem from './member/member.controller.js';
+import * as bid from './bidding/bidding.controller.js';
+import { bidLimiter } from '../middleware/rateLimit.js';
 
 const SA = 'SUPER_ADMIN';
 const M = 'MANAGER';
@@ -71,4 +73,12 @@ export function registerEngineRoutes(router: Router) {
   router.get('/me/member/auctions', ...auth(MB), mem.memberAuctions);
   router.get('/me/member/dividends', ...auth(MB), mem.memberDividends);
   router.get('/me/member/payments', ...auth(MB), mem.memberPayments);
+
+  // P8 — online bidding
+  router.post('/engine/member/sessions/:id/bids', ...auth(MB), bidLimiter, bid.memberBid);
+  router.get('/engine/member/sessions/:id/live', ...auth(MB), bid.memberLive);
+  router.get('/engine/member/sessions/:id/stream', ...auth(MB), bid.memberStream);
+  router.get('/engine/sessions/:id/live', ...auth(SA, M, S), bid.staffLive);
+  router.post('/engine/sessions/:id/bids', ...auth(SA, M), bidLimiter, bid.managerBid);
+  router.post('/engine/sessions/:id/result-from-bids', ...auth(SA, M), bid.resultFromBids);
 }
