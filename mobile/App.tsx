@@ -26,6 +26,8 @@ import { AuctionsPayoutsTab } from './src/modules/manager/AuctionsPayoutsTab';
 import { ComplianceReportsTab } from './src/modules/manager/ComplianceReportsTab';
 import { StaffTab } from './src/modules/manager/StaffTab';
 import { KhataBookTab } from './src/modules/manager/KhataBookTab';
+import { EngineTab } from './src/modules/engine/EngineTab';
+import { MemberApp } from './src/modules/engine/MemberApp';
 
 // --- MAIN APP CONTROLLER ---
 function MainApp() {
@@ -46,6 +48,7 @@ function MainApp() {
     | 'compliance'
     | 'staff'
     | 'khatabook'
+    | 'engine'
   >('dashboard');
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [openStaffCreateOnLoad, setOpenStaffCreateOnLoad] = useState(false);
@@ -109,10 +112,15 @@ function MainApp() {
     return <LoginView onLogin={login} />;
   }
 
+  // P7: members get their own app (own tickets, dues, auctions and the live auction room only)
+  if (user.role === 'MEMBER') {
+    return <MemberApp user={user} logout={logout} />;
+  }
+
   // Allowed tabs per role with automatic fallback to 'dashboard' to prevent blank screens
   const allowedTabsByRole: Record<string, string[]> = {
     SUPER_ADMIN: ['dashboard', 'companies', 'admins', 'compliance', 'audits', 'system', 'backups', 'notifications', 'khatabook'],
-    MANAGER: ['dashboard', 'khatabook', 'staff', 'members', 'chit_groups', 'collections', 'accounting', 'auctions', 'notifications'],
+    MANAGER: ['dashboard', 'khatabook', 'staff', 'members', 'chit_groups', 'collections', 'accounting', 'auctions', 'engine', 'notifications'],
     COLLECTION_STAFF: ['dashboard', 'khatabook', 'chit_groups', 'collections', 'members', 'notifications'],
   };
   const roleAllowed = allowedTabsByRole[user.role] || ['dashboard'];
@@ -266,6 +274,13 @@ function MainApp() {
                 </TouchableOpacity>
 
                 <TouchableOpacity
+                  style={[styles.navItem, effectiveTab === 'engine' && styles.navItemActive]}
+                  onPress={() => setActiveTab('engine')}
+                >
+                  <Text style={[styles.navText, effectiveTab === 'engine' && styles.navTextActive]}>⚙️ Auction Engine</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
                   style={[styles.navItem, effectiveTab === 'khatabook' && styles.navItemActive]}
                   onPress={() => setActiveTab('khatabook')}
                 >
@@ -383,6 +398,7 @@ function MainApp() {
           {effectiveTab === 'collections' && (user.role === 'MANAGER' || user.role === 'COLLECTION_STAFF') && <CollectionsTab user={user} />}
           {effectiveTab === 'accounting' && user.role === 'MANAGER' && <AccountingTab user={user} />}
           {effectiveTab === 'auctions' && user.role === 'MANAGER' && <AuctionsPayoutsTab user={user} />}
+          {effectiveTab === 'engine' && user.role === 'MANAGER' && <EngineTab user={user} />}
           {effectiveTab === 'compliance' && user.role === 'SUPER_ADMIN' && <ComplianceReportsTab user={user} />}
           {effectiveTab === 'khatabook' && (user.role === 'MANAGER' || user.role === 'COLLECTION_STAFF' || user.role === 'SUPER_ADMIN') && (
             <KhataBookTab user={user} />

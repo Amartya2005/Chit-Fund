@@ -9,7 +9,7 @@ export interface User {
   fullName: string;
   phone: string;
   email?: string | null;
-  role: 'SUPER_ADMIN' | 'MANAGER' | 'COLLECTION_STAFF';
+  role: 'SUPER_ADMIN' | 'MANAGER' | 'COLLECTION_STAFF' | 'MEMBER';
   aadhaarNo?: string | null;
   panNo?: string | null;
   address?: string | null;

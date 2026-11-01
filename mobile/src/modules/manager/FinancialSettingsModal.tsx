@@ -27,6 +27,17 @@ const LABELS: Record<string, Record<string, string>> = {
   'dividend.unallocatedDestination': { PENDING_DECISION: 'Kept aside, pending a decision', ROUNDING_RESERVE: 'Kept in a rounding reserve' },
   'contribution.rounding': { PAISE_HALF_UP: 'Nearest paisa', PAISE_DOWN: 'Paisa, rounded down', RUPEE_HALF_UP: 'Nearest rupee' },
   'contribution.differenceHandling': { TRACK: 'Tracked (shown, not adjusted)', LAST_PERIOD_ADJUSTS: 'Last instalment adjusts' },
+  'contribution.paymentAllocation': { TAGGED_PERIOD: 'To the instalment the collector picks', OLDEST_FIRST: 'Oldest unpaid instalment first' },
+  'penalty.mode': { NONE: 'No penalties', FLAT_PER_PERIOD: 'Fixed amount per missed instalment', PERCENT_OF_OVERDUE: 'Percentage of the overdue amount' },
+  'settlement.settlementApproval': { NONE: 'Not needed', SECOND_PERSON: 'Always a second manager', ABOVE_THRESHOLD: 'A second manager above a prize amount' },
+  'settlement.adjustmentApproval': { NONE: 'Not needed', SECOND_PERSON: 'A second manager' },
+  'settlement.prizeDeductions': { NONE: 'Nothing deducted', OVERDUE_DUES: 'Overdue dues are deducted' },
+  'scheduling.mode': { OFFLINE: 'At the office', ONLINE: 'Online', HYBRID: 'Online and at the office' },
+  'scheduling.lockPoint': { AT_OPEN: 'When the auction opens', AT_RESULT_ENTRY: 'When the result is entered' },
+  'scheduling.noBidRule': { CANCEL_SESSION: 'Auction is cancelled', CARRY_FORWARD: 'Marked “no bid” and carried forward' },
+  'bidding.format': { OPEN_ASCENDING: 'Open — everyone sees the best bid', SEALED: 'Sealed until closing' },
+  'bidding.showBidderAs': { TICKET_NUMBER: 'Ticket number', NAME: 'Name' },
+  'bidding.proxyBidding': { NOT_ALLOWED: 'Not allowed', MANAGER_ON_BEHALF: 'Manager may bid for a member' },
 };
 
 const SECTIONS: { title: string; hint: string; rows: { path: string; label: string }[] }[] = [
@@ -70,6 +81,47 @@ const SECTIONS: { title: string; hint: string; rows: { path: string; label: stri
     ],
   },
   {
+    title: 'Collections & penalties',
+    hint: 'How payments are applied and what happens when an instalment is late.',
+    rows: [
+      { path: 'contribution.paymentAllocation', label: 'A payment goes' },
+      { path: 'penalty.mode', label: 'Late payment' },
+      { path: 'penalty.flatAmount', label: 'Penalty per missed instalment' },
+      { path: 'penalty.percent', label: 'Penalty (% of overdue)' },
+      { path: 'penalty.graceDays', label: 'Grace days' },
+      { path: 'penalty.maxPerPeriod', label: 'Penalty cap per instalment' },
+    ],
+  },
+  {
+    title: 'Auctions & approvals',
+    hint: 'How auctions run, who may win, who must approve.',
+    rows: [
+      { path: 'scheduling.mode', label: 'Auctions are held' },
+      { path: 'scheduling.lockPoint', label: 'Settings are frozen' },
+      { path: 'scheduling.noBidRule', label: 'If nobody bids' },
+      { path: 'eligibility.maxWinsPerTicket', label: 'Wins allowed per ticket' },
+      { path: 'eligibility.maxOverdueAmount', label: 'Highest overdue amount to win' },
+      { path: 'eligibility.requireKycVerified', label: 'KYC must be verified' },
+      { path: 'settlement.settlementApproval', label: 'Result approval' },
+      { path: 'settlement.approvalThreshold', label: 'Approval needed above' },
+      { path: 'settlement.adjustmentApproval', label: 'Waiver approval' },
+      { path: 'settlement.prizeDeductions', label: 'From the prize' },
+    ],
+  },
+  {
+    title: 'Online bidding',
+    hint: 'Only used for online and hybrid auctions.',
+    rows: [
+      { path: 'bidding.format', label: 'Bids are' },
+      { path: 'bidding.minIncrement', label: 'Minimum raise' },
+      { path: 'bidding.antiSnipingWindowSeconds', label: 'Late-bid window (seconds)' },
+      { path: 'bidding.extensionSeconds', label: 'Extension (seconds)' },
+      { path: 'bidding.maxExtensions', label: 'Maximum extensions' },
+      { path: 'bidding.showBidderAs', label: 'Bidders are shown by' },
+      { path: 'bidding.proxyBidding', label: 'Bidding for someone else' },
+    ],
+  },
+  {
     title: 'Legal limits (set by the administrator)',
     hint: 'Ceilings no setting may exceed. Entered only after legal validation.',
     rows: [
@@ -91,7 +143,11 @@ function display(path: string, values: any): string | undefined {
   const v = values?.[section]?.[key];
   if (v === undefined) return undefined;
   if (key === 'step') return v === null ? 'No step (set for this group)' : inr(v);
-  if (key === 'fixedAmount') return inr(v);
+  if (['fixedAmount', 'flatAmount', 'approvalThreshold', 'minIncrement'].includes(key)) return inr(v);
+  if (key === 'maxPerPeriod') return v === null ? 'No cap' : inr(v);
+  if (key === 'percent') return `${v}%`;
+  if (key === 'maxWinsPerTicket') return v === 'UNLIMITED' ? 'Unlimited' : String(v);
+  if (key === 'maxOverdueAmount') return v === 'NOT_CHECKED' ? 'Not checked' : inr(v);
   if (key === 'min' || key === 'max' || key === 'maxDiscount') return bound(v);
   if (key === 'ratePercent' || key === 'maxCommissionPercentOfChit') return `${v}%`;
   if (typeof v === 'boolean') return v ? 'Yes' : 'No';
@@ -142,7 +198,12 @@ export function FinancialSettingsModal({ group, visible, onClose, canSeeHistory 
   const hidden = (path: string) =>
     (path === 'commission.fixedAmount' && basis !== 'FIXED_AMOUNT') ||
     (path === 'commission.ratePercent' && basis === 'FIXED_AMOUNT') ||
-    (path === 'dividend.winnerSharesCurrentDividend' && eff?.values?.dividend?.divisor !== 'ACTIVE_NON_PRIZED_TICKETS');
+    (path === 'dividend.winnerSharesCurrentDividend' && eff?.values?.dividend?.divisor !== 'ACTIVE_NON_PRIZED_TICKETS') ||
+    (path === 'penalty.flatAmount' && eff?.values?.penalty?.mode !== 'FLAT_PER_PERIOD') ||
+    (path === 'penalty.percent' && eff?.values?.penalty?.mode !== 'PERCENT_OF_OVERDUE') ||
+    (['penalty.graceDays', 'penalty.maxPerPeriod'].includes(path) && (!eff?.values?.penalty?.mode || eff.values.penalty.mode === 'NONE')) ||
+    (path === 'settlement.approvalThreshold' && eff?.values?.settlement?.settlementApproval !== 'ABOVE_THRESHOLD') ||
+    (path.startsWith('bidding.') && !['ONLINE', 'HYBRID'].includes(eff?.values?.scheduling?.mode));
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -165,8 +226,9 @@ export function FinancialSettingsModal({ group, visible, onClose, canSeeHistory 
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
                 <Text style={{ fontSize: 13, color: '#334155' }}>
-                  Read-only view. This group uses the existing auction workflow ({eff.groupEngineVersion || 'LEGACY'}); these settings are not applied to its auctions
-                  yet.
+                  {eff.groupEngineVersion === 'ENGINE_V1'
+                    ? 'Read-only view. This group runs on the auction engine; each new auction freezes these settings when it locks.'
+                    : 'Read-only view. This group uses the existing auction workflow; these settings apply once it is moved to the engine.'}
                 </Text>
                 <Text style={{ fontSize: 12, color: '#64748B', marginTop: 4 }}>
                   {eff.complete ? '✓ Every business decision is set.' : `⚠ ${eff.missing.length} business decision(s) not made yet.`}{' '}
